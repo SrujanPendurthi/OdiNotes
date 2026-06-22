@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Frontend build output
+dist/
+
+# Rust / Tauri build artifacts
+src-tauri/target/
+src-tauri/gen/
+
+# Generated icons (regenerate with: node scripts/gen-icon.mjs && npx tauri icon app-icon.png)
+app-icon.png
+
+# Editor / OS
+.DS_Store
+*.log

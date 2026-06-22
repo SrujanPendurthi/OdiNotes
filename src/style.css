@@ -1,0 +1,114 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- CodeMirror shell ---------------------------------------------------- */
+.cm-editor {
+  height: 100%;
+  font-size: 16px;
+}
+
+.cm-scroller {
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.7;
+}
+
+/* Centred, comfortable writing column. */
+.cm-content {
+  padding: 2.5rem 0 40vh;
+  max-width: 46rem;
+  margin: 0 auto;
+  caret-color: #c0caf5;
+}
+
+.cm-line {
+  padding: 0 1.25rem;
+}
+
+.cm-cursor,
+.cm-dropCursor {
+  border-left-color: #c0caf5;
+}
+
+.cm-selectionBackground,
+.cm-content ::selection {
+  background: #283457 !important;
+}
+
+/* ---- Live-preview formatting -------------------------------------------- */
+.cm-h1 {
+  font-size: 1.9em;
+  font-weight: 700;
+  line-height: 1.3;
+}
+.cm-h2 {
+  font-size: 1.55em;
+  font-weight: 700;
+  line-height: 1.3;
+}
+.cm-h3 {
+  font-size: 1.3em;
+  font-weight: 700;
+}
+.cm-h4 {
+  font-size: 1.15em;
+  font-weight: 700;
+}
+.cm-h5 {
+  font-size: 1.05em;
+  font-weight: 700;
+}
+.cm-h6 {
+  font-size: 1em;
+  font-weight: 700;
+  color: #9aa5ce;
+}
+
+.cm-strong {
+  font-weight: 700;
+}
+.cm-emphasis {
+  font-style: italic;
+}
+.cm-strike {
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+.cm-inline-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+  background: #1f2335;
+  border: 1px solid #2a2b3c;
+  border-radius: 4px;
+  padding: 0.05em 0.35em;
+}
+
+/* Slim, unobtrusive scrollbars. */
+.cm-scroller::-webkit-scrollbar,
+nav::-webkit-scrollbar {
+  width: 10px;
+}
+.cm-scroller::-webkit-scrollbar-thumb,
+nav::-webkit-scrollbar-thumb {
+  background: #2a2b3c;
+  border-radius: 5px;
+}
