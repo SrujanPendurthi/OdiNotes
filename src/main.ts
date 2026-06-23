@@ -147,6 +147,12 @@ function renderFolder(node: FileNode, depth: number): HTMLElement {
     activeDir = node.path;
     renderTree();
   });
+  row.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    activeDir = node.path;
+    showContextMenu(e.clientX, e.clientY, node.path);
+  });
 
   wrap.appendChild(row);
 
@@ -171,12 +177,16 @@ function renderFileRow(node: FileNode, depth: number): HTMLElement {
 
   row.append(dot, label);
   row.addEventListener("click", () => openFile(node.path));
+  row.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    showContextMenu(e.clientX, e.clientY, dirname(node.path));
+  });
   return row;
 }
 
 // ---- Create note / folder --------------------------------------------------
-btnNewFile.addEventListener("click", async () => {
-  const dir = activeDir ?? vaultPath;
+async function newNote(dir: string | null) {
   if (!dir) return;
   const name = await promptModal("New note", "Untitled");
   if (!name) return;
@@ -187,10 +197,9 @@ btnNewFile.addEventListener("click", async () => {
   } catch (e) {
     alertModal(String(e));
   }
-});
+}
 
-btnNewFolder.addEventListener("click", async () => {
-  const parent = activeDir ?? vaultPath;
+async function newFolder(parent: string | null) {
   if (!parent) return;
   const name = await promptModal("New folder", "");
   if (!name) return;
@@ -200,7 +209,10 @@ btnNewFolder.addEventListener("click", async () => {
   } catch (e) {
     alertModal(String(e));
   }
-});
+}
+
+btnNewFile.addEventListener("click", () => newNote(activeDir ?? vaultPath));
+btnNewFolder.addEventListener("click", () => newFolder(activeDir ?? vaultPath));
 
 btnOpenVault.addEventListener("click", async () => {
   const path = await pickVault();
@@ -267,6 +279,81 @@ function alertModal(message: string) {
     if (statusSaveEl.textContent === message) statusSaveEl.textContent = "";
   }, 4000);
 }
+
+// ---- Right-click context menu ---------------------------------------------
+// Suppress the native webview menu (Inspect / Reload) everywhere…
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+
+// …and offer our own when right-clicking empty file-tree space (→ vault root).
+treeEl.addEventListener("contextmenu", (e) => {
+  if (!vaultPath) return;
+  e.preventDefault();
+  showContextMenu(e.clientX, e.clientY, vaultPath);
+});
+
+let openMenu: HTMLElement | null = null;
+let dismissHandler: ((e: Event) => void) | null = null;
+
+function closeContextMenu() {
+  if (dismissHandler) {
+    document.removeEventListener("pointerdown", dismissHandler, true);
+    dismissHandler = null;
+  }
+  openMenu?.remove();
+  openMenu = null;
+}
+
+function showContextMenu(x: number, y: number, dir: string) {
+  closeContextMenu();
+
+  const menu = document.createElement("div");
+  menu.className =
+    "fixed z-50 min-w-44 overflow-hidden rounded-md border border-border bg-panel py-1 text-sm shadow-xl";
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+
+  const item = (label: string, onClick: () => void): HTMLButtonElement => {
+    const b = document.createElement("button");
+    b.className =
+      "flex w-full items-center px-3 py-1.5 text-left text-fg/90 hover:bg-accent hover:text-bg";
+    b.textContent = label;
+    b.addEventListener("click", () => {
+      closeContextMenu();
+      onClick();
+    });
+    return b;
+  };
+
+  menu.append(
+    item("New note", () => newNote(dir)),
+    item("New folder", () => newFolder(dir)),
+  );
+
+  document.body.appendChild(menu);
+  openMenu = menu;
+
+  // Nudge back on-screen if opened near a right/bottom edge.
+  const rect = menu.getBoundingClientRect();
+  if (rect.right > window.innerWidth) menu.style.left = `${x - rect.width}px`;
+  if (rect.bottom > window.innerHeight) menu.style.top = `${y - rect.height}px`;
+
+  // Close only on a *new* press outside the menu. Deferring the binding past
+  // this event loop tick keeps the opening right-click from closing it instantly.
+  dismissHandler = (e: Event) => {
+    if (openMenu && !openMenu.contains(e.target as Node)) closeContextMenu();
+  };
+  setTimeout(() => {
+    if (dismissHandler) {
+      document.addEventListener("pointerdown", dismissHandler, true);
+    }
+  }, 0);
+}
+
+// Also dismiss on Escape or window resize.
+window.addEventListener("resize", closeContextMenu);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeContextMenu();
+});
 
 // ---- Path helpers (work for POSIX paths on macOS/Linux) --------------------
 function basename(p: string): string {
