@@ -37,3 +37,7 @@ export const createFile = (dir: string, name: string): Promise<string> =>
 /** Create a folder inside `parent`. Returns the new folder path. */
 export const createDir = (parent: string, name: string): Promise<string> =>
   invoke("create_dir", { parent, name });
+
+/** Move a file or folder into `destDir`. Returns its new path. */
+export const movePath = (src: string, destDir: string): Promise<string> =>
+  invoke("move_path", { src, destDir });

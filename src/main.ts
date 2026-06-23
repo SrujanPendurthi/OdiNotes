@@ -8,6 +8,7 @@ import {
   writeFile,
   createFile,
   createDir,
+  movePath,
 } from "./vault";
 
 const STORAGE_KEY = "odinotes.vault";
@@ -18,6 +19,7 @@ let currentFile: string | null = null;
 let activeDir: string | null = null; // where new notes/folders land
 let tree: FileNode[] = [];
 const collapsed = new Set<string>();
+let dragSrcPath: string | null = null; // file/folder being dragged
 
 let editor: EditorHandle;
 let suppressChange = false; // ignore the change event fired while loading a file
@@ -154,6 +156,27 @@ function renderFolder(node: FileNode, depth: number): HTMLElement {
     showContextMenu(e.clientX, e.clientY, node.path);
   });
 
+  // A folder can be dragged…
+  makeDraggable(row, node.path);
+
+  // …and is a drop target that nests the dragged item inside it.
+  row.addEventListener("dragover", (e) => {
+    if (!dragSrcPath || dragSrcPath === node.path) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    row.classList.add("ring-1", "ring-accent", "bg-accent/20");
+  });
+  row.addEventListener("dragleave", () => {
+    row.classList.remove("ring-1", "ring-accent", "bg-accent/20");
+  });
+  row.addEventListener("drop", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    row.classList.remove("ring-1", "ring-accent", "bg-accent/20");
+    void moveInto(dragSrcPath, node.path);
+  });
+
   wrap.appendChild(row);
 
   if (!isCollapsed && node.children.length) {
@@ -182,8 +205,60 @@ function renderFileRow(node: FileNode, depth: number): HTMLElement {
     e.stopPropagation();
     showContextMenu(e.clientX, e.clientY, dirname(node.path));
   });
+  makeDraggable(row, node.path);
   return row;
 }
+
+// ---- Drag & drop (move files / folders) ------------------------------------
+function makeDraggable(row: HTMLElement, path: string) {
+  row.draggable = true;
+  row.addEventListener("dragstart", (e) => {
+    dragSrcPath = path;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", path);
+    }
+    e.stopPropagation();
+  });
+  row.addEventListener("dragend", () => {
+    dragSrcPath = null;
+  });
+}
+
+async function moveInto(src: string | null, destDir: string) {
+  if (!src) return;
+  dragSrcPath = null;
+  // No-op when dropping an item back into its current parent.
+  if (dirname(src) === destDir) return;
+
+  try {
+    const newPath = await movePath(src, destDir);
+    // If the open file (or its containing folder) moved, follow it.
+    if (currentFile === src) {
+      currentFile = newPath;
+      statusPathEl.textContent = relativeToVault(currentFile);
+    } else if (currentFile && currentFile.startsWith(src + "/")) {
+      currentFile = newPath + currentFile.slice(src.length);
+      statusPathEl.textContent = relativeToVault(currentFile);
+    }
+    if (activeDir === src) activeDir = newPath;
+    await refreshTree();
+  } catch (e) {
+    alertModal(String(e));
+  }
+}
+
+// Dropping onto empty file-tree space moves the item to the vault root.
+treeEl.addEventListener("dragover", (e) => {
+  if (!dragSrcPath || !vaultPath) return;
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+});
+treeEl.addEventListener("drop", (e) => {
+  e.preventDefault();
+  if (!vaultPath) return;
+  void moveInto(dragSrcPath, vaultPath);
+});
 
 // ---- Create note / folder --------------------------------------------------
 async function newNote(dir: string | null) {

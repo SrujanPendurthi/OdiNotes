@@ -89,6 +89,33 @@ fn create_file(dir: String, name: String) -> Result<String, String> {
     Ok(path.to_string_lossy().to_string())
 }
 
+/// Move a file or folder into `dest_dir`, keeping its name. Returns the new path.
+#[tauri::command]
+fn move_path(src: String, dest_dir: String) -> Result<String, String> {
+    let src_path = PathBuf::from(&src);
+    let dest_dir_path = PathBuf::from(&dest_dir);
+
+    let name = src_path
+        .file_name()
+        .ok_or_else(|| "Invalid source path".to_string())?;
+    let target = dest_dir_path.join(name);
+
+    // Dropping onto its current parent is a no-op.
+    if target == src_path {
+        return Ok(src);
+    }
+    // A folder cannot be moved into itself or any of its descendants.
+    if src_path.is_dir() && dest_dir_path.starts_with(&src_path) {
+        return Err("Cannot move a folder into itself".into());
+    }
+    if target.exists() {
+        return Err("An item with that name already exists in the destination".into());
+    }
+
+    fs::rename(&src_path, &target).map_err(|e| e.to_string())?;
+    Ok(target.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 fn create_dir(parent: String, name: String) -> Result<String, String> {
     let name = name.trim();
@@ -112,7 +139,8 @@ fn main() {
             read_file,
             write_file,
             create_file,
-            create_dir
+            create_dir,
+            move_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running OdiNotes");

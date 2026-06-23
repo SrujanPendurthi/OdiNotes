@@ -10,7 +10,9 @@ Optimised for minimal RAM and CPU on macOS and Linux.
 - **Live inline preview** — bold, italics, headings, strikethrough and inline
   code render in place as you type (CodeMirror 6); raw syntax markers reveal
   only when the cursor enters them.
-- **Create files & folders** from inside the app.
+- **Create files & folders** from inside the app (toolbar or right-click menu).
+- **Drag to reorganise** — drag a note or folder onto another folder to nest it,
+  or onto empty sidebar space to move it to the vault root.
 - **Auto-save** — edits flush to disk ~400 ms after you stop typing.
 - **Tiny footprint** — native webview (no Electron), size-optimised release
   profile, lazy-loaded syntax grammars.
@@ -80,3 +82,4 @@ note. The last-used vault is remembered between sessions.
 - `list_tree(path)` → recursive tree of folders and `.md` files
 - `read_file(path)` / `write_file(path, contents)`
 - `create_file(dir, name)` / `create_dir(parent, name)`
+- `move_path(src, dest_dir)` → move a file/folder into another folder
