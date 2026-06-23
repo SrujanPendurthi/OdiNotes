@@ -12,10 +12,21 @@
         id="sidebar"
         class="flex w-64 shrink-0 flex-col border-r border-border bg-panel"
       >
-        <header class="flex items-center justify-between px-3 py-2.5 border-b border-border">
-          <span id="vault-name" class="truncate text-sm font-semibold tracking-wide text-fg">
-            OdiNotes
-          </span>
+        <header class="flex items-center gap-1.5 px-2 py-2 border-b border-border">
+          <div class="relative min-w-0 flex-1">
+            <span class="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-muted">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+            </span>
+            <input
+              id="search"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Search notes…"
+              disabled
+              class="w-full rounded border border-border bg-bg py-1 pl-7 pr-2 text-xs text-fg placeholder:text-muted outline-none focus:border-accent disabled:opacity-40"
+            />
+          </div>
           <div class="flex items-center gap-1">
             <button
               id="btn-new-file"
@@ -38,6 +49,9 @@
 
         <!-- File tree (populated by JS) -->
         <nav id="tree" class="flex-1 overflow-y-auto px-1.5 py-2 text-sm"></nav>
+
+        <!-- Fuzzy search results (shown while searching; populated by JS) -->
+        <nav id="search-results" class="hidden flex-1 overflow-y-auto px-1.5 py-2 text-sm"></nav>
 
         <footer class="border-t border-border p-2">
           <button

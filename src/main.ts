@@ -1,4 +1,5 @@
 import "./style.css";
+import { Fzf, type FzfResultItem } from "fzf";
 import { createEditor, type EditorHandle } from "./editor";
 import {
   type FileNode,
@@ -30,7 +31,8 @@ const $ = <T extends HTMLElement>(id: string): T =>
   document.getElementById(id) as T;
 
 const treeEl = $("tree");
-const vaultNameEl = $("vault-name");
+const searchEl = $<HTMLInputElement>("search");
+const searchResultsEl = $("search-results");
 const emptyStateEl = $("empty-state");
 const statusPathEl = $("status-path");
 const statusSaveEl = $("status-save");
@@ -63,8 +65,9 @@ async function openVault(path: string) {
   vaultPath = path;
   activeDir = path;
   localStorage.setItem(STORAGE_KEY, path);
-  vaultNameEl.textContent = basename(path);
-  vaultNameEl.title = path;
+  searchEl.disabled = false;
+  searchEl.title = path;
+  searchEl.placeholder = `Search ${basename(path)}…`;
   btnNewFile.disabled = false;
   btnNewFolder.disabled = false;
   await refreshTree();
@@ -74,6 +77,9 @@ async function refreshTree() {
   if (!vaultPath) return;
   tree = await listTree(vaultPath);
   renderTree();
+  rebuildSearchIndex();
+  // Keep an active search in sync with files that were just created/moved.
+  if (searchEl.value.trim()) runSearch(searchEl.value);
 }
 
 async function openFile(path: string) {
@@ -260,6 +266,157 @@ treeEl.addEventListener("drop", (e) => {
   void moveInto(dragSrcPath, vaultPath);
 });
 
+// ---- Fuzzy search (fzf) ----------------------------------------------------
+interface SearchItem {
+  path: string;
+  rel: string; // vault-relative path, ".md" stripped — what we match & show
+}
+
+let fzf: Fzf<SearchItem[]> | null = null;
+let searchResults: FzfResultItem<SearchItem>[] = [];
+let searchSelected = 0;
+const SEARCH_LIMIT = 50;
+
+function flattenFiles(nodes: FileNode[], out: SearchItem[] = []): SearchItem[] {
+  for (const node of nodes) {
+    if (node.is_dir) flattenFiles(node.children, out);
+    else
+      out.push({
+        path: node.path,
+        rel: relativeToVault(node.path).replace(/\.md$/i, ""),
+      });
+  }
+  return out;
+}
+
+function rebuildSearchIndex() {
+  fzf = new Fzf(flattenFiles(tree), { selector: (i) => i.rel });
+}
+
+function runSearch(query: string) {
+  const q = query.trim();
+  if (!q || !fzf) {
+    showTree();
+    return;
+  }
+  searchResults = fzf.find(q).slice(0, SEARCH_LIMIT);
+  searchSelected = 0;
+  renderSearchResults();
+  showSearchResults();
+}
+
+function showTree() {
+  searchResults = [];
+  searchResultsEl.classList.add("hidden");
+  treeEl.classList.remove("hidden");
+}
+
+function showSearchResults() {
+  treeEl.classList.add("hidden");
+  searchResultsEl.classList.remove("hidden");
+}
+
+// Wrap fuzzy-matched characters so they stand out in the result row.
+function highlightMatch(text: string, positions: Set<number>): DocumentFragment {
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < text.length; i++) {
+    if (positions.has(i)) {
+      const mark = document.createElement("span");
+      mark.className = "text-accent font-semibold";
+      mark.textContent = text[i];
+      frag.appendChild(mark);
+    } else {
+      frag.appendChild(document.createTextNode(text[i]));
+    }
+  }
+  return frag;
+}
+
+function renderSearchResults() {
+  searchResultsEl.innerHTML = "";
+
+  if (!searchResults.length) {
+    const empty = document.createElement("div");
+    empty.className = "px-2 py-2 text-xs text-muted";
+    empty.textContent = "No matches";
+    searchResultsEl.appendChild(empty);
+    return;
+  }
+
+  searchResults.forEach((res, idx) => {
+    const row = document.createElement("div");
+    row.className = "flex items-center gap-1 rounded px-1.5 py-1 cursor-pointer text-fg/90 hover:bg-border/60";
+    row.dataset.idx = String(idx);
+
+    const dot = document.createElement("span");
+    dot.className = "shrink-0 text-muted";
+    dot.innerHTML =
+      '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>';
+
+    const label = document.createElement("span");
+    label.className = "truncate";
+    label.appendChild(highlightMatch(res.item.rel, res.positions));
+
+    row.append(dot, label);
+    row.addEventListener("click", () => selectResult(idx));
+    searchResultsEl.appendChild(row);
+  });
+
+  highlightSelected();
+}
+
+function highlightSelected() {
+  const rows = searchResultsEl.querySelectorAll<HTMLElement>("[data-idx]");
+  rows.forEach((row, idx) => {
+    row.classList.toggle("bg-accent/20", idx === searchSelected);
+    row.classList.toggle("text-fg", idx === searchSelected);
+  });
+}
+
+function moveSelection(delta: number) {
+  if (!searchResults.length) return;
+  searchSelected =
+    (searchSelected + delta + searchResults.length) % searchResults.length;
+  highlightSelected();
+  searchResultsEl
+    .querySelector(`[data-idx="${searchSelected}"]`)
+    ?.scrollIntoView({ block: "nearest" });
+}
+
+function selectResult(idx: number) {
+  const item = searchResults[idx]?.item;
+  if (!item) return;
+  clearSearch();
+  void openFile(item.path);
+}
+
+function clearSearch() {
+  searchEl.value = "";
+  showTree();
+}
+
+searchEl.addEventListener("input", () => runSearch(searchEl.value));
+searchEl.addEventListener("keydown", (e) => {
+  switch (e.key) {
+    case "ArrowDown":
+      e.preventDefault();
+      moveSelection(1);
+      break;
+    case "ArrowUp":
+      e.preventDefault();
+      moveSelection(-1);
+      break;
+    case "Enter":
+      e.preventDefault();
+      if (searchResults.length) selectResult(searchSelected);
+      break;
+    case "Escape":
+      e.preventDefault();
+      searchEl.value ? clearSearch() : searchEl.blur();
+      break;
+  }
+});
+
 // ---- Create note / folder --------------------------------------------------
 async function newNote(dir: string | null) {
   if (!dir) return;
@@ -428,6 +585,12 @@ function showContextMenu(x: number, y: number, dir: string) {
 window.addEventListener("resize", closeContextMenu);
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeContextMenu();
+  // ⌘/Ctrl+K jumps to the search bar.
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k" && !searchEl.disabled) {
+    e.preventDefault();
+    searchEl.focus();
+    searchEl.select();
+  }
 });
 
 // ---- Path helpers (work for POSIX paths on macOS/Linux) --------------------
