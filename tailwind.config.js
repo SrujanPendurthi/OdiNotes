@@ -5,13 +5,13 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Tokyo-night inspired palette, easy on the eyes.
-        bg: "#1a1b26",
-        panel: "#16161e",
-        border: "#2a2b3c",
-        fg: "#c0caf5",
-        muted: "#565f89",
-        accent: "#7aa2f7",
+        // Neutral dark-grey / white palette.
+        bg: "#1e1e1e",
+        panel: "#181818",
+        border: "#333333",
+        fg: "#f5f5f5",
+        muted: "#8a8a8a",
+        accent: "#b0b0b0",
       },
     },
   },
