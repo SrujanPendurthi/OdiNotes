@@ -93,6 +93,7 @@ async function openVault(path: string) {
   btnNewFile.disabled = false;
   btnNewFolder.disabled = false;
   await refreshTree();
+  renderTabs(); // reveal the tab bar (and its "+") for the opened vault
 }
 
 async function refreshTree() {
@@ -194,9 +195,11 @@ async function closeTab(path: string) {
 // ---- Tab bar rendering -----------------------------------------------------
 function renderTabs() {
   tabbarEl.innerHTML = "";
-  const hasTabs = tabs.length > 0;
-  tabbarEl.classList.toggle("hidden", !hasTabs);
-  tabbarEl.classList.toggle("flex", hasTabs);
+  // Show the tab bar (and its "+" button) whenever a vault is open.
+  const show = !!vaultPath;
+  tabbarEl.classList.toggle("hidden", !show);
+  tabbarEl.classList.toggle("flex", show);
+  if (!show) return;
 
   for (const path of tabs) {
     const active = path === currentFile;
@@ -232,6 +235,16 @@ function renderTabs() {
     });
     tabbarEl.appendChild(tab);
   }
+
+  // Trailing "+" — create a new note in a new tab.
+  const add = document.createElement("button");
+  add.title = "New note";
+  add.className =
+    "flex shrink-0 items-center justify-center px-2 text-muted hover:bg-border/40 hover:text-fg";
+  add.innerHTML =
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
+  add.addEventListener("click", () => void newNote(activeDir ?? vaultPath));
+  tabbarEl.appendChild(add);
 }
 
 // ---- Tab persistence -------------------------------------------------------
