@@ -44,16 +44,23 @@ const btnOpenVault = $<HTMLButtonElement>("btn-open-vault");
 const tabbarEl = $("tabbar");
 const sidebarEl = $("sidebar");
 const btnToggleSidebar = $<HTMLButtonElement>("btn-toggle-sidebar");
-const btnShowSidebar = $<HTMLButtonElement>("btn-show-sidebar");
+
+// On macOS the title bar is drawn as an overlay, so inset the top bar to clear
+// the native traffic-light buttons.
+if (navigator.userAgent.includes("Macintosh")) {
+  $("titlebar").classList.add("pl-20");
+}
 
 // ---- Sidebar collapse ------------------------------------------------------
+let sidebarCollapsed = false;
 function setSidebarCollapsed(collapsed: boolean) {
+  sidebarCollapsed = collapsed;
   sidebarEl.classList.toggle("hidden", collapsed);
-  btnShowSidebar.classList.toggle("hidden", !collapsed);
   localStorage.setItem(SIDEBAR_KEY, collapsed ? "1" : "0");
 }
-btnToggleSidebar.addEventListener("click", () => setSidebarCollapsed(true));
-btnShowSidebar.addEventListener("click", () => setSidebarCollapsed(false));
+btnToggleSidebar.addEventListener("click", () =>
+  setSidebarCollapsed(!sidebarCollapsed),
+);
 
 // ---- Editor wiring ---------------------------------------------------------
 editor = createEditor($("editor"), (doc) => {

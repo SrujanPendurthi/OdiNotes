@@ -131,9 +131,46 @@ fn create_dir(parent: String, name: String) -> Result<String, String> {
     Ok(path.to_string_lossy().to_string())
 }
 
+/// Put the macOS title bar in "overlay" mode: the content view fills the whole
+/// window (extending under the title bar) and the title text is hidden, while
+/// the native traffic-light buttons stay. This lets our HTML top bar sit on the
+/// same row as those buttons. Done at runtime so it doesn't depend on Tauri's
+/// platform-specific config-file merge.
+#[cfg(target_os = "macos")]
+fn apply_overlay_titlebar(window: &tauri::WebviewWindow) {
+    use objc::runtime::Object;
+    use objc::{msg_send, sel, sel_impl};
+
+    // NSWindowStyleMask::FullSizeContentView and NSWindowTitleVisibility::Hidden.
+    const NS_FULL_SIZE_CONTENT_VIEW: usize = 1 << 15;
+    const NS_WINDOW_TITLE_HIDDEN: isize = 1;
+
+    let ns_window = match window.ns_window() {
+        Ok(ptr) => ptr as *mut Object,
+        Err(_) => return,
+    };
+
+    unsafe {
+        let style: usize = msg_send![ns_window, styleMask];
+        let _: () = msg_send![ns_window, setStyleMask: style | NS_FULL_SIZE_CONTENT_VIEW];
+        let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: true];
+        let _: () = msg_send![ns_window, setTitleVisibility: NS_WINDOW_TITLE_HIDDEN];
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .setup(|_app| {
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::Manager;
+                if let Some(window) = _app.get_webview_window("main") {
+                    apply_overlay_titlebar(&window);
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             list_tree,
             read_file,
