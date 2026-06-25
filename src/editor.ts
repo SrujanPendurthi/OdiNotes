@@ -39,7 +39,16 @@ import { GFM } from "@lezer/markdown";
 import { tags as t } from "@lezer/highlight";
 
 export interface EditorHandle {
-  setDoc(text: string): void;
+  // Swap the editor to the document identified by `key`. If a state for `key`
+  // already exists (an open tab) it is restored verbatim (cursor/scroll/undo);
+  // otherwise a fresh state is created from `text`.
+  openDoc(key: string, text: string): void;
+  // Drop a document's retained state (when its tab closes).
+  closeDoc(key: string): void;
+  // Re-key a document's retained state (when its file is moved/renamed).
+  renameDoc(oldKey: string, newKey: string): void;
+  // Blank the view with no active document (when the last tab closes).
+  clear(): void;
   getDoc(): string;
   focus(): void;
   destroy(): void;
@@ -348,48 +357,97 @@ export function createEditor(
   parent: HTMLElement,
   onChange: (doc: string) => void,
 ): EditorHandle {
+  // While the view swaps between tabs we mustn't report the swap as an edit.
+  let suppress = false;
   const listener = EditorView.updateListener.of((u) => {
-    if (u.docChanged) onChange(u.state.doc.toString());
+    if (!suppress && u.docChanged) onChange(u.state.doc.toString());
   });
 
-  const state = EditorState.create({
-    doc: "",
-    extensions: [
-      history(),
-      drawSelection(),
-      EditorView.lineWrapping,
-      // Tab nests the current list item (indent); Shift+Tab promotes it
-      // (outdent). The list-aware commands run first and fall through to
-      // generic indent/outdent outside a list. Listed before defaultKeymap so
-      // the editor claims the Tab key.
-      keymap.of([
-        { key: "Tab", run: indentList },
-        { key: "Tab", run: indentMore },
-        { key: "Shift-Tab", run: outdentList },
-        { key: "Shift-Tab", run: indentLess },
-        ...defaultKeymap,
-        ...historyKeymap,
-      ]),
-      markdown({
-        base: markdownLanguage,
-        codeLanguages: languages,
-        extensions: [GFM],
-      }),
-      syntaxHighlighting(highlightStyle),
-      livePreview,
-      hangingIndent,
-      theme,
-      listener,
-    ],
-  });
+  // Shared by every tab's EditorState so they all behave identically.
+  const extensions = [
+    history(),
+    drawSelection(),
+    EditorView.lineWrapping,
+    // Tab nests the current list item (indent); Shift+Tab promotes it
+    // (outdent). The list-aware commands run first and fall through to
+    // generic indent/outdent outside a list. Listed before defaultKeymap so
+    // the editor claims the Tab key.
+    keymap.of([
+      { key: "Tab", run: indentList },
+      { key: "Tab", run: indentMore },
+      { key: "Shift-Tab", run: outdentList },
+      { key: "Shift-Tab", run: indentLess },
+      ...defaultKeymap,
+      ...historyKeymap,
+    ]),
+    markdown({
+      base: markdownLanguage,
+      codeLanguages: languages,
+      extensions: [GFM],
+    }),
+    syntaxHighlighting(highlightStyle),
+    livePreview,
+    hangingIndent,
+    theme,
+    listener,
+  ];
 
-  const view = new EditorView({ state, parent });
+  const makeState = (doc: string) => EditorState.create({ doc, extensions });
+
+  // One retained EditorState (doc + selection + undo history) and one scroll
+  // offset per open tab, keyed by the tab's file path.
+  const states = new Map<string, EditorState>();
+  const scroll = new Map<string, number>();
+  let currentKey: string | null = null;
+
+  const view = new EditorView({ state: makeState(""), parent });
+
+  // Stash the current state + scroll under `currentKey` before swapping away.
+  const stash = () => {
+    if (currentKey === null) return;
+    states.set(currentKey, view.state);
+    scroll.set(currentKey, view.scrollDOM.scrollTop);
+  };
+
+  // Swap a state into the view without firing onChange, then restore scroll.
+  const swap = (state: EditorState, top: number) => {
+    suppress = true;
+    view.setState(state);
+    suppress = false;
+    view.scrollDOM.scrollTop = top;
+  };
 
   return {
-    setDoc(text) {
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: text },
-      });
+    openDoc(key, text) {
+      if (key === currentKey) return;
+      stash();
+      const existing = states.get(key);
+      swap(existing ?? makeState(text), scroll.get(key) ?? 0);
+      currentKey = key;
+    },
+    closeDoc(key) {
+      states.delete(key);
+      scroll.delete(key);
+      if (key === currentKey) currentKey = null;
+    },
+    renameDoc(oldKey, newKey) {
+      if (oldKey === newKey) return;
+      const state = states.get(oldKey);
+      if (state) {
+        states.set(newKey, state);
+        states.delete(oldKey);
+      }
+      const top = scroll.get(oldKey);
+      if (top !== undefined) {
+        scroll.set(newKey, top);
+        scroll.delete(oldKey);
+      }
+      if (currentKey === oldKey) currentKey = newKey;
+    },
+    clear() {
+      stash();
+      swap(makeState(""), 0);
+      currentKey = null;
     },
     getDoc() {
       return view.state.doc.toString();

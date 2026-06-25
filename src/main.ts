@@ -14,17 +14,18 @@ import {
 
 const STORAGE_KEY = "odinotes.vault";
 const SIDEBAR_KEY = "odinotes.sidebarCollapsed";
+const TABS_KEY = "odinotes.tabs";
 
 // ---- App state -------------------------------------------------------------
 let vaultPath: string | null = null;
-let currentFile: string | null = null;
+let currentFile: string | null = null; // path of the active tab (null = none)
+let tabs: string[] = []; // ordered paths of open tabs
 let activeDir: string | null = null; // where new notes/folders land
 let tree: FileNode[] = [];
 const collapsed = new Set<string>();
 let dragSrcPath: string | null = null; // file/folder being dragged
 
 let editor: EditorHandle;
-let suppressChange = false; // ignore the change event fired while loading a file
 let saveTimer: number | undefined;
 
 // ---- Element lookups -------------------------------------------------------
@@ -40,6 +41,7 @@ const statusSaveEl = $("status-save");
 const btnNewFile = $<HTMLButtonElement>("btn-new-file");
 const btnNewFolder = $<HTMLButtonElement>("btn-new-folder");
 const btnOpenVault = $<HTMLButtonElement>("btn-open-vault");
+const tabbarEl = $("tabbar");
 const sidebarEl = $("sidebar");
 const btnToggleSidebar = $<HTMLButtonElement>("btn-toggle-sidebar");
 const btnShowSidebar = $<HTMLButtonElement>("btn-show-sidebar");
@@ -55,7 +57,7 @@ btnShowSidebar.addEventListener("click", () => setSidebarCollapsed(false));
 
 // ---- Editor wiring ---------------------------------------------------------
 editor = createEditor($("editor"), (doc) => {
-  if (suppressChange || !currentFile) return;
+  if (!currentFile) return;
   scheduleSave(doc);
 });
 
@@ -95,8 +97,8 @@ async function refreshTree() {
   if (searchEl.value.trim()) runSearch(searchEl.value);
 }
 
-async function openFile(path: string) {
-  // Flush any pending save for the previous file first.
+// Flush the active tab's pending save to disk before switching away from it.
+async function flushSave() {
   window.clearTimeout(saveTimer);
   if (currentFile) {
     try {
@@ -105,19 +107,159 @@ async function openFile(path: string) {
       /* best effort */
     }
   }
+}
 
-  const text = await readFile(path);
-  suppressChange = true;
-  editor.setDoc(text);
-  suppressChange = false;
-
+// Make `path` the active tab and update the chrome around it (or clear the
+// editor when `path` is null, i.e. no tabs are open).
+function setActive(path: string | null) {
   currentFile = path;
-  activeDir = dirname(path);
-  emptyStateEl.classList.add("hidden");
-  statusPathEl.textContent = relativeToVault(path);
-  statusSaveEl.textContent = "Saved";
-  editor.focus();
+  if (path) {
+    activeDir = dirname(path);
+    emptyStateEl.classList.add("hidden");
+    statusPathEl.textContent = relativeToVault(path);
+    statusSaveEl.textContent = "Saved";
+    editor.focus();
+  } else {
+    emptyStateEl.classList.remove("hidden");
+    statusPathEl.textContent = "No file open";
+    statusSaveEl.textContent = "";
+  }
+  renderTabs();
   renderTree();
+  persistTabs();
+}
+
+// Open a note. By default it replaces the active tab; with `newTab` (⌘/middle
+// click) it opens alongside. An already-open note simply gets focused.
+async function openFile(path: string, newTab = false) {
+  if (path === currentFile) return;
+  if (tabs.includes(path)) return activateTab(path);
+
+  await flushSave();
+  const text = await readFile(path);
+
+  if (newTab || !currentFile) {
+    const at = currentFile ? tabs.indexOf(currentFile) + 1 : tabs.length;
+    tabs.splice(at, 0, path);
+  } else {
+    // Replace the active tab in place.
+    editor.closeDoc(currentFile);
+    tabs[tabs.indexOf(currentFile)] = path;
+  }
+
+  editor.openDoc(path, text);
+  setActive(path);
+}
+
+// Focus an already-open tab, restoring its retained editor state.
+async function activateTab(path: string) {
+  if (path === currentFile) return;
+  await flushSave();
+  editor.openDoc(path, "");
+  setActive(path);
+}
+
+// Close a tab, falling back to a neighbouring tab (or the empty state).
+async function closeTab(path: string) {
+  const idx = tabs.indexOf(path);
+  if (idx === -1) return;
+  if (path === currentFile) await flushSave();
+
+  tabs.splice(idx, 1);
+  editor.closeDoc(path);
+
+  if (path !== currentFile) {
+    renderTabs();
+    persistTabs();
+    return;
+  }
+
+  const next = tabs[idx] ?? tabs[idx - 1] ?? null;
+  if (next) {
+    editor.openDoc(next, "");
+    setActive(next);
+  } else {
+    editor.clear();
+    setActive(null);
+  }
+}
+
+// ---- Tab bar rendering -----------------------------------------------------
+function renderTabs() {
+  tabbarEl.innerHTML = "";
+  const hasTabs = tabs.length > 0;
+  tabbarEl.classList.toggle("hidden", !hasTabs);
+  tabbarEl.classList.toggle("flex", hasTabs);
+
+  for (const path of tabs) {
+    const active = path === currentFile;
+    const tab = document.createElement("div");
+    tab.className =
+      "group flex h-full min-w-0 max-w-[10rem] shrink-0 cursor-pointer items-center gap-1 border-r border-border px-2 " +
+      (active ? "bg-bg text-fg" : "text-muted hover:bg-border/40 hover:text-fg");
+
+    const label = document.createElement("span");
+    label.className = "truncate text-[11px]";
+    label.textContent = basename(path).replace(/\.md$/i, "");
+
+    const close = document.createElement("button");
+    close.title = "Close tab";
+    close.className =
+      "shrink-0 rounded p-0.5 text-muted hover:bg-border hover:text-fg group-hover:opacity-100 " +
+      (active ? "opacity-100" : "opacity-0");
+    close.innerHTML =
+      '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>';
+    close.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void closeTab(path);
+    });
+
+    tab.append(label, close);
+    tab.addEventListener("click", () => void activateTab(path));
+    // Middle-click closes, matching browser tab behaviour.
+    tab.addEventListener("auxclick", (e) => {
+      if (e.button === 1) {
+        e.preventDefault();
+        void closeTab(path);
+      }
+    });
+    tabbarEl.appendChild(tab);
+  }
+}
+
+// ---- Tab persistence -------------------------------------------------------
+function persistTabs() {
+  localStorage.setItem(TABS_KEY, JSON.stringify({ tabs, active: currentFile }));
+}
+
+// Reopen the tabs from the last session whose files still exist.
+async function restoreTabs() {
+  const raw = localStorage.getItem(TABS_KEY);
+  if (!raw) return;
+  let saved: { tabs?: unknown; active?: unknown };
+  try {
+    saved = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  const onDisk = new Set(flattenFiles(tree).map((f) => f.path));
+  const valid = Array.isArray(saved.tabs)
+    ? (saved.tabs as unknown[]).filter(
+        (p): p is string => typeof p === "string" && onDisk.has(p),
+      )
+    : [];
+  if (!valid.length) return;
+
+  for (const p of valid) {
+    tabs.push(p);
+    editor.openDoc(p, await readFile(p));
+  }
+  const active =
+    typeof saved.active === "string" && valid.includes(saved.active)
+      ? saved.active
+      : valid[valid.length - 1];
+  editor.openDoc(active, "");
+  setActive(active);
 }
 
 // ---- Sidebar rendering -----------------------------------------------------
@@ -218,7 +360,16 @@ function renderFileRow(node: FileNode, depth: number): HTMLElement {
   label.textContent = node.name.replace(/\.md$/i, "");
 
   row.append(dot, label);
-  row.addEventListener("click", () => openFile(node.path));
+  // ⌘/Ctrl-click opens in a new tab; a plain click reuses the active tab.
+  row.addEventListener("click", (e) => {
+    void openFile(node.path, e.metaKey || e.ctrlKey);
+  });
+  row.addEventListener("auxclick", (e) => {
+    if (e.button === 1) {
+      e.preventDefault();
+      void openFile(node.path, true);
+    }
+  });
   row.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -252,15 +403,25 @@ async function moveInto(src: string | null, destDir: string) {
 
   try {
     const newPath = await movePath(src, destDir);
-    // If the open file (or its containing folder) moved, follow it.
-    if (currentFile === src) {
-      currentFile = newPath;
-      statusPathEl.textContent = relativeToVault(currentFile);
-    } else if (currentFile && currentFile.startsWith(src + "/")) {
-      currentFile = newPath + currentFile.slice(src.length);
+    // Follow any open tabs whose path was the moved item or lived inside it.
+    const remap = (p: string): string =>
+      p === src
+        ? newPath
+        : p.startsWith(src + "/")
+          ? newPath + p.slice(src.length)
+          : p;
+    tabs = tabs.map((p) => {
+      const np = remap(p);
+      if (np !== p) editor.renameDoc(p, np);
+      return np;
+    });
+    if (currentFile) {
+      currentFile = remap(currentFile);
       statusPathEl.textContent = relativeToVault(currentFile);
     }
     if (activeDir === src) activeDir = newPath;
+    renderTabs();
+    persistTabs();
     await refreshTree();
   } catch (e) {
     alertModal(String(e));
@@ -438,7 +599,7 @@ async function newNote(dir: string | null) {
   try {
     const path = await createFile(dir, name);
     await refreshTree();
-    await openFile(path);
+    await openFile(path, true);
   } catch (e) {
     alertModal(String(e));
   }
@@ -604,6 +765,18 @@ document.addEventListener("keydown", (e) => {
     searchEl.focus();
     searchEl.select();
   }
+  // ⌘/Ctrl+W closes the active tab.
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "w" && currentFile) {
+    e.preventDefault();
+    void closeTab(currentFile);
+  }
+  // Ctrl+Tab / Ctrl+Shift+Tab cycle through open tabs.
+  if (e.ctrlKey && e.key === "Tab" && tabs.length > 1) {
+    e.preventDefault();
+    const i = currentFile ? tabs.indexOf(currentFile) : 0;
+    const next = tabs[(i + (e.shiftKey ? -1 : 1) + tabs.length) % tabs.length];
+    void activateTab(next);
+  }
 });
 
 // ---- Path helpers (work for POSIX paths on macOS/Linux) --------------------
@@ -629,6 +802,7 @@ function relativeToVault(p: string): string {
   if (saved) {
     try {
       await openVault(saved);
+      await restoreTabs();
     } catch {
       localStorage.removeItem(STORAGE_KEY);
     }

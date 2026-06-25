@@ -72,6 +72,11 @@
 
       <!-- Main editor area -->
       <main class="flex min-w-0 flex-1 flex-col bg-bg">
+        <!-- Open tabs (populated by JS; hidden when nothing is open) -->
+        <div
+          id="tabbar"
+          class="hidden h-7 shrink-0 items-stretch overflow-x-auto border-b border-border bg-panel"
+        ></div>
         <div id="editor-wrap" class="relative flex-1 overflow-hidden">
           <!-- Reopen sidebar (shown only while the sidebar is collapsed) -->
           <button
