@@ -13,6 +13,7 @@ import {
 } from "./vault";
 
 const STORAGE_KEY = "odinotes.vault";
+const SIDEBAR_KEY = "odinotes.sidebarCollapsed";
 
 // ---- App state -------------------------------------------------------------
 let vaultPath: string | null = null;
@@ -39,6 +40,18 @@ const statusSaveEl = $("status-save");
 const btnNewFile = $<HTMLButtonElement>("btn-new-file");
 const btnNewFolder = $<HTMLButtonElement>("btn-new-folder");
 const btnOpenVault = $<HTMLButtonElement>("btn-open-vault");
+const sidebarEl = $("sidebar");
+const btnToggleSidebar = $<HTMLButtonElement>("btn-toggle-sidebar");
+const btnShowSidebar = $<HTMLButtonElement>("btn-show-sidebar");
+
+// ---- Sidebar collapse ------------------------------------------------------
+function setSidebarCollapsed(collapsed: boolean) {
+  sidebarEl.classList.toggle("hidden", collapsed);
+  btnShowSidebar.classList.toggle("hidden", !collapsed);
+  localStorage.setItem(SIDEBAR_KEY, collapsed ? "1" : "0");
+}
+btnToggleSidebar.addEventListener("click", () => setSidebarCollapsed(true));
+btnShowSidebar.addEventListener("click", () => setSidebarCollapsed(false));
 
 // ---- Editor wiring ---------------------------------------------------------
 editor = createEditor($("editor"), (doc) => {
@@ -611,6 +624,7 @@ function relativeToVault(p: string): string {
 
 // ---- Boot ------------------------------------------------------------------
 (async function init() {
+  setSidebarCollapsed(localStorage.getItem(SIDEBAR_KEY) === "1");
   const saved = localStorage.getItem(STORAGE_KEY);
   if (saved) {
     try {
