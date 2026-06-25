@@ -15,8 +15,8 @@
         "title": "OdiNotes",
         "width": 1100,
         "height": 720,
-        "minWidth": 680,
-        "minHeight": 460,
+        "minWidth": 200,
+        "minHeight": 200,
         "dragDropEnabled": false
       }
     ],
