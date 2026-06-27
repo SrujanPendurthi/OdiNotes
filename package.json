@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:install": "npm run tauri build && rm -rf /Applications/OdiNotes.app && cp -R src-tauri/target/release/bundle/macos/OdiNotes.app /Applications/"
   },
   "dependencies": {
     "@codemirror/commands": "^6.7.1",

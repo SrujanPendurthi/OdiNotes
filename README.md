@@ -75,6 +75,24 @@ npm run tauri build
 On first launch click **Open Vault…**, choose a folder, then create or open a
 note. The last-used vault is remembered between sessions.
 
+## Docker
+
+OdiNotes is a desktop GUI app, so Docker is **not** for running it — it's a
+reproducible environment that bundles the build/dev dependencies. See the
+`Dockerfile` header for details. Two uses:
+
+```bash
+# Build Linux bundles (.deb/.AppImage) into ./artifacts — no local Rust/Node needed.
+# Linux only; a macOS .app/.dmg can't be produced in a container.
+DOCKER_BUILDKIT=1 docker build --target export -o ./artifacts .
+
+# Frontend dev server with hot reload (native APIs unavailable) → http://localhost:1420
+docker compose up dev
+
+# Type-check + production frontend build (the repo's correctness gate)
+docker compose run --rm typecheck
+```
+
 ## Backend commands
 
 `src-tauri/src/main.rs` exposes five Tauri commands, invoked from `vault.ts`:
@@ -83,3 +101,23 @@ note. The last-used vault is remembered between sessions.
 - `read_file(path)` / `write_file(path, contents)`
 - `create_file(dir, name)` / `create_dir(parent, name)`
 - `move_path(src, dest_dir)` → move a file/folder into another folder
+
+## Install as a Mac app
+
+To use OdiNotes like any other Mac app — launched from Spotlight/Launchpad/Dock,
+working with no terminal open — build a production bundle and copy it into
+`/Applications`. One command does both:
+
+\`\`\`bash
+npm run build:install
+\`\`\`
+
+This runs `npm run tauri build` (type-check, frontend build, size-optimised
+release compile) and copies the resulting `OdiNotes.app` into `/Applications`,
+replacing any previous install. Launch it from Spotlight (`⌘Space` → "OdiNotes"),
+Launchpad, or the Applications folder.
+
+The installed app is a snapshot — re-run `npm run build:install` to pick up
+source changes. A locally built app has no quarantine flag, so Gatekeeper launches
+it cleanly; if macOS ever blocks it, run
+`xattr -dr com.apple.quarantine /Applications/OdiNotes.app`.
