@@ -44,7 +44,8 @@ of the frontend imports from this module, never `@tauri-apps/api` directly.
 **Frontend `main.ts`** — the app shell and all state (module-level `let`s: `vaultPath`,
 `currentFile` (active tab's path), `tabs` (ordered open paths), `activeDir`, `tree`, `collapsed`,
 `dragSrcPath`, `sidebarCollapsed`). Responsibilities: the **tab strip** (open/activate/close,
-⌘/middle-click for new tab, trailing `+`, persistence), renders the sidebar file tree imperatively
+trailing `+`, persistence) — any sidebar/search click opens the file in its own tab via `openFile`
+(focusing it if already open), renders the sidebar file tree imperatively
 (no virtual DOM — `renderTree()` rebuilds from `tree`), debounced auto-save (~400 ms after typing
 stops), fuzzy file search via `fzf` (⌘/Ctrl+K), drag-and-drop to move files/folders, the
 right-click context menu, and a custom `promptModal` (Tauri webviews have no `window.prompt`).

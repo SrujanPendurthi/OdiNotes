@@ -140,23 +140,17 @@ function setActive(path: string | null) {
   persistTabs();
 }
 
-// Open a note. By default it replaces the active tab; with `newTab` (⌘/middle
-// click) it opens alongside. An already-open note simply gets focused.
-async function openFile(path: string, newTab = false) {
+// Open a note in its own tab: focus it if already open, otherwise append a new
+// tab (after the active one) and focus it.
+async function openFile(path: string) {
   if (path === currentFile) return;
   if (tabs.includes(path)) return activateTab(path);
 
   await flushSave();
   const text = await readFile(path);
 
-  if (newTab || !currentFile) {
-    const at = currentFile ? tabs.indexOf(currentFile) + 1 : tabs.length;
-    tabs.splice(at, 0, path);
-  } else {
-    // Replace the active tab in place.
-    editor.closeDoc(currentFile);
-    tabs[tabs.indexOf(currentFile)] = path;
-  }
+  const at = currentFile ? tabs.indexOf(currentFile) + 1 : tabs.length;
+  tabs.splice(at, 0, path);
 
   editor.openDoc(path, text);
   setActive(path);
@@ -444,14 +438,14 @@ function renderFileRow(node: FileNode, depth: number): HTMLElement {
   label.textContent = node.name.replace(/\.md$/i, "");
 
   row.append(dot, label);
-  // ⌘/Ctrl-click opens in a new tab; a plain click reuses the active tab.
-  row.addEventListener("click", (e) => {
-    void openFile(node.path, e.metaKey || e.ctrlKey);
+  // Any click opens the file in its own tab (or focuses it if already open).
+  row.addEventListener("click", () => {
+    void openFile(node.path);
   });
   row.addEventListener("auxclick", (e) => {
     if (e.button === 1) {
       e.preventDefault();
-      void openFile(node.path, true);
+      void openFile(node.path);
     }
   });
   row.addEventListener("contextmenu", (e) => {
@@ -749,7 +743,7 @@ async function newNote(dir: string | null) {
   try {
     const path = await createUntitled(dir);
     await refreshTree();
-    await openFile(path, true);
+    await openFile(path);
     startRename(path); // drop straight into inline rename of the new note
   } catch (e) {
     alertModal(String(e));
