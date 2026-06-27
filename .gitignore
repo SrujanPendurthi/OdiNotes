@@ -8,6 +8,9 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 
+# Docker bundle output (docker build --target export -o ./artifacts .)
+artifacts/
+
 # Generated icons (regenerate with: node scripts/gen-icon.mjs && npx tauri icon app-icon.png)
 app-icon.png
 

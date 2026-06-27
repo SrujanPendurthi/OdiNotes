@@ -41,3 +41,7 @@ export const createDir = (parent: string, name: string): Promise<string> =>
 /** Move a file or folder into `destDir`. Returns its new path. */
 export const movePath = (src: string, destDir: string): Promise<string> =>
   invoke("move_path", { src, destDir });
+
+/** Move a file or folder into the vault's hidden Trash folder. Returns its new path. */
+export const trashPath = (vault: string, src: string): Promise<string> =>
+  invoke("trash_path", { vault, src });

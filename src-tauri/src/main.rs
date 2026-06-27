@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+/// Name of the vault-root folder that trashed items are moved into. It is
+/// hidden from the UI (filtered out in `list_tree`).
+const TRASH_DIR: &str = "Trash";
+
 /// A node in the vault tree: either a folder (with children) or a `.md` file.
 #[derive(Serialize)]
 struct FileNode {
@@ -58,7 +62,11 @@ fn build_tree(dir: &Path) -> Vec<FileNode> {
 
 #[tauri::command]
 fn list_tree(path: String) -> Vec<FileNode> {
-    build_tree(Path::new(&path))
+    let mut nodes = build_tree(Path::new(&path));
+    // Hide the vault-root Trash folder; only ever filtered at the root, so a
+    // user folder named "Trash" deeper in the tree still shows.
+    nodes.retain(|n| !(n.is_dir && n.name == TRASH_DIR));
+    nodes
 }
 
 #[tauri::command]
@@ -110,6 +118,40 @@ fn move_path(src: String, dest_dir: String) -> Result<String, String> {
     }
     if target.exists() {
         return Err("An item with that name already exists in the destination".into());
+    }
+
+    fs::rename(&src_path, &target).map_err(|e| e.to_string())?;
+    Ok(target.to_string_lossy().to_string())
+}
+
+/// Move a file or folder into the vault's hidden `Trash` folder, creating it if
+/// needed. On a name collision in Trash, a Unix-timestamp suffix is appended so
+/// an earlier trashed item with the same name is never clobbered. Returns the
+/// item's new path inside Trash.
+#[tauri::command]
+fn trash_path(vault: String, src: String) -> Result<String, String> {
+    let src_path = PathBuf::from(&src);
+    let name = src_path
+        .file_name()
+        .ok_or_else(|| "Invalid source path".to_string())?
+        .to_string_lossy()
+        .to_string();
+
+    let trash_dir = PathBuf::from(&vault).join(TRASH_DIR);
+    fs::create_dir_all(&trash_dir).map_err(|e| e.to_string())?;
+
+    let mut target = trash_dir.join(&name);
+    if target.exists() {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // Insert the timestamp before the extension: "note.md" -> "note 1730.md".
+        let renamed = match name.rsplit_once('.') {
+            Some((stem, ext)) => format!("{stem} {ts}.{ext}"),
+            None => format!("{name} {ts}"),
+        };
+        target = trash_dir.join(renamed);
     }
 
     fs::rename(&src_path, &target).map_err(|e| e.to_string())?;
@@ -177,7 +219,8 @@ fn main() {
             write_file,
             create_file,
             create_dir,
-            move_path
+            move_path,
+            trash_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running OdiNotes");

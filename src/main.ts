@@ -10,6 +10,7 @@ import {
   createFile,
   createDir,
   movePath,
+  trashPath,
 } from "./vault";
 
 const STORAGE_KEY = "odinotes.vault";
@@ -192,6 +193,61 @@ async function closeTab(path: string) {
   }
 }
 
+// Drop tabs WITHOUT saving — used when their files are being trashed, so a
+// pending autosave (or a flush) can't recreate them on disk. `paths` is the
+// trashed item plus, for a folder, every open tab beneath it.
+function forgetTabs(paths: string[]) {
+  const doomed = new Set(paths);
+  const oldTabs = tabs.slice();
+  const hitCurrent = currentFile !== null && doomed.has(currentFile);
+  if (hitCurrent) window.clearTimeout(saveTimer); // cancel the debounced write
+
+  for (const p of paths) {
+    if (oldTabs.includes(p)) editor.closeDoc(p);
+  }
+  tabs = oldTabs.filter((p) => !doomed.has(p));
+
+  if (!hitCurrent) {
+    renderTabs();
+    persistTabs();
+    return;
+  }
+
+  // The active tab is gone — fall back to the nearest surviving neighbour.
+  const at = oldTabs.indexOf(currentFile!);
+  let next: string | null = null;
+  for (let i = at + 1; i < oldTabs.length && !next; i++)
+    if (!doomed.has(oldTabs[i])) next = oldTabs[i];
+  for (let i = at - 1; i >= 0 && !next; i--)
+    if (!doomed.has(oldTabs[i])) next = oldTabs[i];
+
+  if (next) {
+    editor.openDoc(next, "");
+    setActive(next);
+  } else {
+    editor.clear();
+    setActive(null);
+  }
+}
+
+// Move a file/folder to the vault's hidden Trash and reconcile UI state.
+async function trashNode(node: FileNode) {
+  if (!vaultPath) return;
+  try {
+    await trashPath(vaultPath, node.path);
+    // Forget the trashed item and, for a folder, any open tab inside it —
+    // without flushing, so autosave can't resurrect them at their old paths.
+    const prefix = node.path + "/";
+    forgetTabs(tabs.filter((p) => p === node.path || p.startsWith(prefix)));
+    if (activeDir === node.path || activeDir?.startsWith(prefix)) {
+      activeDir = vaultPath;
+    }
+    await refreshTree();
+  } catch (e) {
+    alertModal(String(e));
+  }
+}
+
 // ---- Tab bar rendering -----------------------------------------------------
 function renderTabs() {
   tabbarEl.innerHTML = "";
@@ -334,7 +390,7 @@ function renderFolder(node: FileNode, depth: number): HTMLElement {
     e.preventDefault();
     e.stopPropagation();
     activeDir = node.path;
-    showContextMenu(e.clientX, e.clientY, node.path);
+    showContextMenu(e.clientX, e.clientY, node.path, node);
   });
 
   // A folder can be dragged…
@@ -393,7 +449,7 @@ function renderFileRow(node: FileNode, depth: number): HTMLElement {
   row.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    showContextMenu(e.clientX, e.clientY, dirname(node.path));
+    showContextMenu(e.clientX, e.clientY, dirname(node.path), node);
   });
   makeDraggable(row, node.path);
   return row;
@@ -729,7 +785,7 @@ function closeContextMenu() {
   openMenu = null;
 }
 
-function showContextMenu(x: number, y: number, dir: string) {
+function showContextMenu(x: number, y: number, dir: string, node?: FileNode) {
   closeContextMenu();
 
   const menu = document.createElement("div");
@@ -754,6 +810,13 @@ function showContextMenu(x: number, y: number, dir: string) {
     item("New note", () => newNote(dir)),
     item("New folder", () => newFolder(dir)),
   );
+
+  // Delete is only offered when right-clicking an actual file/folder row.
+  if (node) {
+    const sep = document.createElement("div");
+    sep.className = "my-1 border-t border-border";
+    menu.append(sep, item("Delete", () => void trashNode(node)));
+  }
 
   document.body.appendChild(menu);
   openMenu = menu;

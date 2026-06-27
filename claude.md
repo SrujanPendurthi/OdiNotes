@@ -25,6 +25,7 @@ There is no test suite and no linter configured. `npm run build` is the only cor
 ## Architecture
 
 The app is a single window split into three layers that talk over Tauri's `invoke` bridge.
+A top bar (sidebar toggle + tab strip) spans the window above a sidebar/editor split.
 
 **Rust backend (`src-tauri/src/main.rs`)** — six stateless `#[tauri::command]`s, all operating
 on absolute path strings: `list_tree`, `read_file`, `write_file`, `create_file`, `create_dir`,
@@ -32,22 +33,33 @@ on absolute path strings: `list_tree`, `read_file`, `write_file`, `create_file`,
 returning a `FileNode { name, path, is_dir, children }` tree (folders first, then
 case-insensitive sort). The backend holds no state — the vault path lives in the frontend.
 New commands must be added to `invoke_handler!` in `main()` **and** to `capabilities/default.json`
-permissions if they need new capabilities.
+permissions if they need new capabilities. The `setup` hook also calls `apply_overlay_titlebar`
+on macOS (see the titlebar note below); that's the only non-command native code, and it uses the
+`objc` crate gated behind `cfg(target_os = "macos")`.
 
 **Frontend `vault.ts`** — the only place that calls `invoke`. Thin typed wrappers around each
 Rust command plus `pickVault` (native folder dialog). Keep all backend coupling here; the rest
 of the frontend imports from this module, never `@tauri-apps/api` directly.
 
 **Frontend `main.ts`** — the app shell and all state (module-level `let`s: `vaultPath`,
-`currentFile`, `activeDir`, `tree`, `collapsed`, `dragSrcPath`). Responsibilities: renders the
-sidebar file tree imperatively (no virtual DOM — `renderTree()` rebuilds from `tree`), debounced
-auto-save (~400 ms after typing stops), fuzzy file search via `fzf` (⌘/Ctrl+K), drag-and-drop to
-move files/folders, the right-click context menu, and a custom `promptModal` (Tauri webviews
-have no `window.prompt`). The last vault is persisted in `localStorage` under `odinotes.vault`.
+`currentFile` (active tab's path), `tabs` (ordered open paths), `activeDir`, `tree`, `collapsed`,
+`dragSrcPath`, `sidebarCollapsed`). Responsibilities: the **tab strip** (open/activate/close,
+⌘/middle-click for new tab, trailing `+`, persistence), renders the sidebar file tree imperatively
+(no virtual DOM — `renderTree()` rebuilds from `tree`), debounced auto-save (~400 ms after typing
+stops), fuzzy file search via `fzf` (⌘/Ctrl+K), drag-and-drop to move files/folders, the
+right-click context menu, and a custom `promptModal` (Tauri webviews have no `window.prompt`).
+Three things persist in `localStorage`: the vault (`odinotes.vault`), sidebar-collapsed state
+(`odinotes.sidebarCollapsed`), and the open tabs + active tab (`odinotes.tabs`, restored on boot
+for files that still exist). Keyboard shortcuts wired here: ⌘/Ctrl+K (search), ⌘/Ctrl+W (close
+tab), Ctrl+Tab / Ctrl+Shift+Tab (cycle tabs).
 
-**Frontend `editor.ts`** — a CodeMirror 6 instance wrapped behind the `EditorHandle` interface
-(`setDoc`/`getDoc`/`focus`/`destroy`). This is the most intricate file. Three custom pieces layer
-on top of CodeMirror:
+**Frontend `editor.ts`** — a single CodeMirror 6 `EditorView`, multiplexed across tabs behind the
+`EditorHandle` interface (`openDoc`/`closeDoc`/`renameDoc`/`clear`/`getDoc`/`focus`/`destroy`).
+Each open tab keeps its own retained `EditorState` (doc + selection + undo history) and scroll
+offset in `Map`s keyed by file path; switching tabs stashes the current state and swaps the stored
+one in (or builds a fresh one) without firing `onChange`. All states share one extensions array so
+every tab behaves identically. This is the most intricate file. Three custom pieces layer on top
+of CodeMirror:
 - **`livePreview` ViewPlugin** — Obsidian-style inline rendering. Walks the Lezer syntax tree and
   applies `Decoration.mark` for styling (bold/italic/headings/etc.) while `Decoration.replace`
   *hides* the raw syntax markers (`#`, `**`, `` ` ``, `~~`) unless a selection touches them.
@@ -62,8 +74,10 @@ on top of CodeMirror:
 
 `main.ts` is the controller: user action → `vault.ts` invoke → mutate state → re-render. The
 editor never touches the filesystem; it only emits doc changes via the `onChange` callback, which
-`main.ts` debounces into `writeFile`. When switching files, `main.ts` flushes the pending save
-before loading the next file, and sets `suppressChange` so the load itself doesn't trigger a save.
+`main.ts` debounces into `writeFile` for `currentFile`. When switching tabs, `main.ts` flushes the
+active tab's pending save first (`flushSave`); the editor itself suppresses `onChange` during the
+state swap so the load never registers as an edit. Moving/renaming a file remaps any open tab paths
+(including children of a moved folder) and calls `editor.renameDoc` so retained state follows.
 
 ## Conventions & gotchas
 
@@ -71,6 +85,12 @@ before loading the next file, and sets `suppressChange` so the load itself doesn
   `/`). The app targets macOS/Linux; Windows paths are not handled.
 - **`dragDropEnabled: false`** in `tauri.conf.json` is intentional — Tauri's native file drag-drop
   otherwise swallows HTML5 drag events the sidebar relies on for moving files.
+- **macOS overlay titlebar.** `apply_overlay_titlebar` (in `main.rs`, run from `setup`) puts the
+  window in full-size-content mode with a hidden title so the HTML top bar shares the row with the
+  native traffic-light buttons. `main.ts` adds a `pl-20` inset to `#titlebar` only on macOS to clear
+  those buttons. The top bar (and `#tabbar`) carry `data-tauri-drag-region` so empty areas drag the
+  window; there are no custom min/close buttons — the native traffic lights handle that. The window
+  `minWidth`/`minHeight` are intentionally small (200×200).
 - **Tailwind uses semantic color tokens** (`bg`, `fg`, `panel`, `border`, `muted`, `accent`)
   defined in `tailwind.config.js`, not raw colors. Use those tokens for consistency with the
   dark theme.

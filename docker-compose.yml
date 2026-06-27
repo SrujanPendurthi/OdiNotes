@@ -1,0 +1,29 @@
+# Convenience wrappers around the Dockerfile targets. See Dockerfile header for
+# what each target is (and isn't) good for. Note: these run the *frontend* only;
+# the Tauri/Rust backend and native APIs are not available in a container.
+services:
+  # Live Vite dev server with hot reload. Open http://localhost:1420.
+  # Source is bind-mounted; node_modules stays the image's copy.
+  dev:
+    build:
+      context: .
+      target: dev
+    ports:
+      - "1420:1420"
+      - "1421:1421" # vite HMR websocket
+    environment:
+      TAURI_DEV_HOST: 0.0.0.0
+    volumes:
+      - .:/app
+      - /app/node_modules
+    command: npm run dev
+
+  # One-shot type-check + production frontend build (the repo's correctness gate).
+  typecheck:
+    build:
+      context: .
+      target: dev
+    volumes:
+      - .:/app
+      - /app/node_modules
+    command: npm run build
