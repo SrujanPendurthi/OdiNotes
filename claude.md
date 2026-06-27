@@ -48,19 +48,24 @@ trailing `+`, persistence) — any sidebar/search click opens the file in its ow
 (focusing it if already open), renders the sidebar file tree imperatively
 (no virtual DOM — `renderTree()` rebuilds from `tree`), debounced auto-save (~400 ms after typing
 stops), fuzzy file search via `fzf` (⌘/Ctrl+K), drag-and-drop to move files/folders, the
-right-click context menu, and a custom `promptModal` (Tauri webviews have no `window.prompt`).
-Three things persist in `localStorage`: the vault (`odinotes.vault`), sidebar-collapsed state
-(`odinotes.sidebarCollapsed`), and the open tabs + active tab (`odinotes.tabs`, restored on boot
-for files that still exist). Keyboard shortcuts wired here: ⌘/Ctrl+K (search), ⌘/Ctrl+W (close
-tab), Ctrl+Tab / Ctrl+Shift+Tab (cycle tabs).
+right-click context menu, a **Settings menu** (gear button in the sidebar footer, built on the
+same `mountMenu` machinery as the context menu — currently a single persisted "Vim mode" toggle),
+and a custom `promptModal` (Tauri webviews have no `window.prompt`).
+Persisted in `localStorage`: the vault (`odinotes.vault`), sidebar-collapsed state
+(`odinotes.sidebarCollapsed`), the open tabs + active tab (`odinotes.tabs`, restored on boot
+for files that still exist), and the Vim toggle (`odinotes.vim`). Keyboard shortcuts wired here:
+⌘/Ctrl+K (search), ⌘/Ctrl+W (close tab), Ctrl+Tab / Ctrl+Shift+Tab (cycle tabs).
 
 **Frontend `editor.ts`** — a single CodeMirror 6 `EditorView`, multiplexed across tabs behind the
 `EditorHandle` interface (`openDoc`/`closeDoc`/`renameDoc`/`clear`/`getDoc`/`focus`/`destroy`).
 Each open tab keeps its own retained `EditorState` (doc + selection + undo history) and scroll
 offset in `Map`s keyed by file path; switching tabs stashes the current state and swaps the stored
 one in (or builds a fresh one) without firing `onChange`. All states share one extensions array so
-every tab behaves identically. This is the most intricate file. Three custom pieces layer on top
-of CodeMirror:
+every tab behaves identically. **Vim mode** (`@replit/codemirror-vim`) sits in a `Compartment` as
+the first extension; `setVim` reconfigures it live, and `swap()` re-asserts the current flag on each
+tab switch so retained states stay consistent. `createEditor` takes a `hooks` object whose
+`onSave`/`onCloseTab` back the `:w`/`:q`/`:wq` ex-commands (`Vim.defineEx`); auto-save runs
+regardless. This is the most intricate file. Three custom pieces layer on top of CodeMirror:
 - **`livePreview` ViewPlugin** — Obsidian-style inline rendering. Walks the Lezer syntax tree and
   applies `Decoration.mark` for styling (bold/italic/headings/etc.) while `Decoration.replace`
   *hides* the raw syntax markers (`#`, `**`, `` ` ``, `~~`) unless a selection touches them.

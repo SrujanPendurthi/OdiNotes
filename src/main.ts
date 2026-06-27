@@ -15,6 +15,7 @@ import {
 } from "./vault";
 
 const STORAGE_KEY = "odinotes.vault";
+const VIM_KEY = "odinotes.vim";
 const SIDEBAR_KEY = "odinotes.sidebarCollapsed";
 const TABS_KEY = "odinotes.tabs";
 
@@ -27,6 +28,7 @@ let tree: FileNode[] = [];
 const collapsed = new Set<string>();
 let dragSrcPath: string | null = null; // file/folder being dragged
 let renamingPath: string | null = null; // row currently in inline-rename mode
+let vimEnabled = localStorage.getItem(VIM_KEY) === "1"; // persisted Vim toggle
 
 let editor: EditorHandle;
 let saveTimer: number | undefined;
@@ -45,6 +47,7 @@ const btnNewFile = $<HTMLButtonElement>("btn-new-file");
 const btnNewFolder = $<HTMLButtonElement>("btn-new-folder");
 const btnOpenVault = $<HTMLButtonElement>("btn-open-vault");
 const vaultNameEl = $("vault-name");
+const btnSettings = $<HTMLButtonElement>("btn-settings");
 const tabbarEl = $("tabbar");
 const sidebarEl = $("sidebar");
 const btnToggleSidebar = $<HTMLButtonElement>("btn-toggle-sidebar");
@@ -67,10 +70,32 @@ btnToggleSidebar.addEventListener("click", () =>
 );
 
 // ---- Editor wiring ---------------------------------------------------------
-editor = createEditor($("editor"), (doc) => {
-  if (!currentFile) return;
-  scheduleSave(doc);
-});
+editor = createEditor(
+  $("editor"),
+  (doc) => {
+    if (!currentFile) return;
+    scheduleSave(doc);
+  },
+  {
+    vimEnabled,
+    // `:w` saves the active tab; `:q` closes it; `:wq` is wired in the editor.
+    onSave: () => {
+      void flushSave().then(() => {
+        if (currentFile) statusSaveEl.textContent = "Saved";
+      });
+    },
+    onCloseTab: () => {
+      if (currentFile) void closeTab(currentFile);
+    },
+  },
+);
+
+// Flip Vim mode, persist it, and apply it to the live editor.
+function setVimEnabled(enabled: boolean) {
+  vimEnabled = enabled;
+  localStorage.setItem(VIM_KEY, enabled ? "1" : "0");
+  editor.setVim(enabled);
+}
 
 function scheduleSave(doc: string) {
   statusSaveEl.textContent = "Saving…";
@@ -898,16 +923,23 @@ function showContextMenu(x: number, y: number, dir: string, node?: FileNode) {
     menu.append(item("Delete", () => void trashNode(node)));
   }
 
+  mountMenu(menu, x, y);
+}
+
+// Place a built menu at (x, y), nudge it back on-screen near a right/bottom
+// edge, and wire dismissal on the next outside press.
+function mountMenu(menu: HTMLElement, x: number, y: number) {
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
   document.body.appendChild(menu);
   openMenu = menu;
 
-  // Nudge back on-screen if opened near a right/bottom edge.
   const rect = menu.getBoundingClientRect();
   if (rect.right > window.innerWidth) menu.style.left = `${x - rect.width}px`;
   if (rect.bottom > window.innerHeight) menu.style.top = `${y - rect.height}px`;
 
   // Close only on a *new* press outside the menu. Deferring the binding past
-  // this event loop tick keeps the opening right-click from closing it instantly.
+  // this event loop tick keeps the opening click from closing it instantly.
   dismissHandler = (e: Event) => {
     if (openMenu && !openMenu.contains(e.target as Node)) closeContextMenu();
   };
@@ -917,6 +949,46 @@ function showContextMenu(x: number, y: number, dir: string, node?: FileNode) {
     }
   }, 0);
 }
+
+// ---- Settings menu ---------------------------------------------------------
+function showSettingsMenu(x: number, y: number) {
+  closeContextMenu();
+
+  const menu = document.createElement("div");
+  menu.className =
+    "fixed z-50 min-w-44 overflow-hidden rounded-md border border-border bg-panel py-1 text-sm shadow-xl";
+
+  // A toggle row: label on the left, a ✓ when on. Stays open so multiple
+  // settings can be flipped before dismissing.
+  const toggle = (
+    label: string,
+    get: () => boolean,
+    set: (v: boolean) => void,
+  ): HTMLButtonElement => {
+    const b = document.createElement("button");
+    b.className =
+      "flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-fg/90 hover:bg-accent hover:text-bg";
+    const text = document.createElement("span");
+    text.textContent = label;
+    const check = document.createElement("span");
+    check.className = "shrink-0";
+    check.textContent = get() ? "✓" : "";
+    b.append(text, check);
+    b.addEventListener("click", () => {
+      set(!get());
+      check.textContent = get() ? "✓" : "";
+    });
+    return b;
+  };
+
+  menu.append(toggle("Vim mode", () => vimEnabled, setVimEnabled));
+  mountMenu(menu, x, y);
+}
+
+btnSettings.addEventListener("click", () => {
+  const r = btnSettings.getBoundingClientRect();
+  showSettingsMenu(r.left, r.top); // edge-nudge floats it above the gear
+});
 
 // Also dismiss on Escape or window resize.
 window.addEventListener("resize", closeContextMenu);
