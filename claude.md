@@ -56,8 +56,18 @@ Persisted in `localStorage`: the vault (`odinotes.vault`), sidebar-collapsed sta
 for files that still exist), and the Vim toggle (`odinotes.vim`). Keyboard shortcuts wired here:
 ⌘/Ctrl+K (search), ⌘/Ctrl+W (close tab), Ctrl+Tab / Ctrl+Shift+Tab (cycle tabs).
 
+When the Vim toggle is on, an **app-wide Vim layer** (`vimDispatch`, a capture-phase keydown
+handler) gives the shell modal control: `appFocus`/`treeCursor` state drives a keyboard cursor over
+the file tree (`flatVisibleNodes` for j/k order), `Ctrl-w h/l` switch pane focus, sidebar motions
+(`j/k/h/l/Enter/gg/G/o/r/dd`) reuse `openFile`/`toggleFolder`/`newNote`/`startRename`/`trashNode`,
+`Space` opens a leader which-key menu (`showLeaderMenu`), and `gt/gT` (when the editor isn't focused)
+cycle tabs via `cycleTab`. It yields entirely when `editor.getVimMode()` is `"insert"`, and
+multi-key sequences (`Ctrl-w _`, `g _`, `dd`) use a `pendingKey` + timeout. All of it is gated on
+`vimEnabled`; `setVimEnabled(false)` tears down the cursor/focus ring.
+
 **Frontend `editor.ts`** — a single CodeMirror 6 `EditorView`, multiplexed across tabs behind the
-`EditorHandle` interface (`openDoc`/`closeDoc`/`renameDoc`/`clear`/`getDoc`/`focus`/`destroy`).
+`EditorHandle` interface
+(`openDoc`/`closeDoc`/`renameDoc`/`clear`/`getDoc`/`focus`/`setVim`/`getVimMode`/`destroy`).
 Each open tab keeps its own retained `EditorState` (doc + selection + undo history) and scroll
 offset in `Map`s keyed by file path; switching tabs stashes the current state and swaps the stored
 one in (or builds a fresh one) without firing `onChange`. All states share one extensions array so

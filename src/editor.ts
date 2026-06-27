@@ -11,7 +11,7 @@ import {
   type Extension,
   type Text,
 } from "@codemirror/state";
-import { vim, Vim } from "@replit/codemirror-vim";
+import { vim, Vim, getCM } from "@replit/codemirror-vim";
 import type { SyntaxNode } from "@lezer/common";
 import {
   EditorView,
@@ -56,6 +56,9 @@ export interface EditorHandle {
   focus(): void;
   // Turn Vim mode on/off live across the view (and every retained tab state).
   setVim(enabled: boolean): void;
+  // The editor's current Vim sub-mode, or null when Vim is off. Lets the app
+  // shell's global keymap yield while the user is typing (insert mode).
+  getVimMode(): "insert" | "visual" | "normal" | null;
   destroy(): void;
 }
 
@@ -516,6 +519,17 @@ export function createEditor(
       view.dispatch({
         effects: vimCompartment.reconfigure(vimExt(enabled)),
       });
+    },
+    getVimMode() {
+      if (!vimOn) return null;
+      const cm = getCM(view);
+      const vs = cm?.state?.vim as
+        | { insertMode?: boolean; visualMode?: boolean }
+        | undefined;
+      if (!vs) return "normal";
+      if (vs.insertMode) return "insert";
+      if (vs.visualMode) return "visual";
+      return "normal";
     },
     destroy() {
       view.destroy();

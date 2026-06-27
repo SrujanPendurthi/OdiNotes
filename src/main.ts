@@ -29,6 +29,8 @@ const collapsed = new Set<string>();
 let dragSrcPath: string | null = null; // file/folder being dragged
 let renamingPath: string | null = null; // row currently in inline-rename mode
 let vimEnabled = localStorage.getItem(VIM_KEY) === "1"; // persisted Vim toggle
+let appFocus: "editor" | "sidebar" = "editor"; // which pane Vim keys drive
+let treeCursor: string | null = null; // path of the keyboard-highlighted row
 
 let editor: EditorHandle;
 let saveTimer: number | undefined;
@@ -95,6 +97,10 @@ function setVimEnabled(enabled: boolean) {
   vimEnabled = enabled;
   localStorage.setItem(VIM_KEY, enabled ? "1" : "0");
   editor.setVim(enabled);
+  if (!enabled) {
+    treeCursor = null;
+    setAppFocus("editor"); // drop the focus ring + cursor, return to the editor
+  }
 }
 
 function scheduleSave(doc: string) {
@@ -163,7 +169,7 @@ function setActive(path: string | null) {
     emptyStateEl.classList.add("hidden");
     statusPathEl.textContent = relativeToVault(path);
     statusSaveEl.textContent = "Saved";
-    editor.focus();
+    setAppFocus("editor"); // opening a file hands keyboard control to the editor
   } else {
     emptyStateEl.classList.remove("hidden");
     statusPathEl.textContent = "No file open";
@@ -372,6 +378,11 @@ async function restoreTabs() {
 function renderTree() {
   treeEl.innerHTML = "";
   treeEl.appendChild(renderNodes(tree, 0));
+  if (appFocus === "sidebar") {
+    treeEl
+      .querySelector<HTMLElement>("[data-cursor]")
+      ?.scrollIntoView({ block: "nearest" });
+  }
 }
 
 function renderNodes(nodes: FileNode[], depth: number): DocumentFragment {
@@ -398,6 +409,7 @@ function renderFolder(node: FileNode, depth: number): HTMLElement {
 
   const row = rowBase(depth);
   if (activeDir === node.path) row.classList.add("bg-border/40");
+  if (node.path === treeCursor) markCursorRow(row);
 
   const chevron = document.createElement("span");
   chevron.className = "shrink-0 text-muted transition-transform";
@@ -410,12 +422,7 @@ function renderFolder(node: FileNode, depth: number): HTMLElement {
   label.textContent = node.name;
 
   row.append(chevron, label);
-  row.addEventListener("click", () => {
-    if (collapsed.has(node.path)) collapsed.delete(node.path);
-    else collapsed.add(node.path);
-    activeDir = node.path;
-    renderTree();
-  });
+  row.addEventListener("click", () => toggleFolder(node.path));
   row.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -455,6 +462,7 @@ function renderFolder(node: FileNode, depth: number): HTMLElement {
 function renderFileRow(node: FileNode, depth: number): HTMLElement {
   const row = rowBase(depth);
   if (currentFile === node.path) row.classList.add("bg-accent/20", "text-fg");
+  if (node.path === treeCursor) markCursorRow(row);
 
   const dot = document.createElement("span");
   dot.className = "shrink-0 text-muted";
@@ -751,6 +759,17 @@ function clearSearch() {
 
 searchEl.addEventListener("input", () => runSearch(searchEl.value));
 searchEl.addEventListener("keydown", (e) => {
+  // Vim-style result navigation: Ctrl-j/Ctrl-n down, Ctrl-k/Ctrl-p up.
+  if (vimEnabled && e.ctrlKey) {
+    if (e.key === "j" || e.key === "n") {
+      e.preventDefault();
+      return moveSelection(1);
+    }
+    if (e.key === "k" || e.key === "p") {
+      e.preventDefault();
+      return moveSelection(-1);
+    }
+  }
   switch (e.key) {
     case "ArrowDown":
       e.preventDefault();
@@ -1006,13 +1025,317 @@ document.addEventListener("keydown", (e) => {
     void closeTab(currentFile);
   }
   // Ctrl+Tab / Ctrl+Shift+Tab cycle through open tabs.
-  if (e.ctrlKey && e.key === "Tab" && tabs.length > 1) {
+  if (e.ctrlKey && e.key === "Tab") {
     e.preventDefault();
-    const i = currentFile ? tabs.indexOf(currentFile) : 0;
-    const next = tabs[(i + (e.shiftKey ? -1 : 1) + tabs.length) % tabs.length];
-    void activateTab(next);
+    cycleTab(e.shiftKey ? -1 : 1);
   }
 });
+
+// ---- App-wide Vim (gated on the Vim toggle) --------------------------------
+// A capture-phase dispatcher gives the shell modal keyboard control: pane focus
+// switching, sidebar tree navigation, a leader menu, and tab motions. It
+// coordinates with the editor via `editor.getVimMode()` so it never steals keys
+// while the user is typing in insert mode.
+
+function markCursorRow(row: HTMLElement) {
+  row.classList.add("ring-1", "ring-inset", "ring-accent");
+  row.dataset.cursor = "1";
+}
+
+// Flatten the tree to the rows currently visible (collapsed folders excluded),
+// in render order — the sequence j/k step through.
+function flatVisibleNodes(nodes: FileNode[] = tree, out: FileNode[] = []): FileNode[] {
+  for (const node of nodes) {
+    out.push(node);
+    if (node.is_dir && !collapsed.has(node.path) && node.children.length) {
+      flatVisibleNodes(node.children, out);
+    }
+  }
+  return out;
+}
+
+function cursorNode(): FileNode | null {
+  return flatVisibleNodes().find((n) => n.path === treeCursor) ?? null;
+}
+
+// Directory new notes/folders land in for the current cursor row.
+function cursorDir(): string | null {
+  const node = cursorNode();
+  if (!node) return activeDir ?? vaultPath;
+  return node.is_dir ? node.path : dirname(node.path);
+}
+
+function setAppFocus(target: "editor" | "sidebar") {
+  appFocus = target;
+  if (target === "sidebar") {
+    const nodes = flatVisibleNodes();
+    if (!treeCursor || !nodes.some((n) => n.path === treeCursor)) {
+      treeCursor = currentFile ?? nodes[0]?.path ?? null;
+    }
+    (document.activeElement as HTMLElement | null)?.blur?.();
+    sidebarEl.classList.add("ring-1", "ring-inset", "ring-accent/40");
+  } else {
+    sidebarEl.classList.remove("ring-1", "ring-inset", "ring-accent/40");
+    if (currentFile) editor.focus();
+  }
+  renderTree();
+}
+
+function moveTreeCursor(delta: number) {
+  const nodes = flatVisibleNodes();
+  if (!nodes.length) return;
+  const i = nodes.findIndex((n) => n.path === treeCursor);
+  const next = i === -1 ? 0 : Math.max(0, Math.min(nodes.length - 1, i + delta));
+  treeCursor = nodes[next].path;
+  renderTree();
+}
+
+function setTreeCursorEnd(end: "first" | "last") {
+  const nodes = flatVisibleNodes();
+  if (!nodes.length) return;
+  treeCursor = (end === "first" ? nodes[0] : nodes[nodes.length - 1]).path;
+  renderTree();
+}
+
+function toggleFolder(path: string) {
+  if (collapsed.has(path)) collapsed.delete(path);
+  else collapsed.add(path);
+  activeDir = path;
+  renderTree();
+}
+
+// `l` / Enter: open a file (and hand focus to the editor) or expand a folder.
+function treeOpen() {
+  const node = cursorNode();
+  if (!node) return;
+  if (node.is_dir) {
+    if (collapsed.has(node.path)) {
+      collapsed.delete(node.path);
+      activeDir = node.path;
+      renderTree();
+    } else {
+      moveTreeCursor(1); // already open — step into the first child
+    }
+  } else {
+    void openFile(node.path);
+  }
+}
+
+// `h`: collapse an open folder, else jump to the parent directory row.
+function treeCollapseOrParent() {
+  const node = cursorNode();
+  if (!node) return;
+  if (node.is_dir && !collapsed.has(node.path)) {
+    collapsed.add(node.path);
+    renderTree();
+    return;
+  }
+  const parent = dirname(node.path);
+  if (flatVisibleNodes().some((n) => n.path === parent)) {
+    treeCursor = parent;
+    renderTree();
+  }
+}
+
+function cycleTab(dir: number) {
+  if (tabs.length < 2) return;
+  const i = currentFile ? tabs.indexOf(currentFile) : 0;
+  const next = tabs[(i + dir + tabs.length) % tabs.length];
+  void activateTab(next);
+}
+
+// Leader (Space) which-key menu: keyboard-driven app actions.
+function showLeaderMenu() {
+  closeContextMenu();
+  const entries: { key: string; label: string; run: () => void }[] = [
+    {
+      key: "f",
+      label: "Find file",
+      run: () => {
+        searchEl.focus();
+        searchEl.select();
+      },
+    },
+    { key: "e", label: "Focus explorer", run: () => setAppFocus("sidebar") },
+    { key: "n", label: "New note", run: () => void newNote(cursorDir()) },
+    {
+      key: "N",
+      label: "New folder",
+      run: () => void newFolder(activeDir ?? vaultPath),
+    },
+    {
+      key: "o",
+      label: "Open vault…",
+      run: () => {
+        void pickVault().then((p) => {
+          if (p) void openVault(p);
+        });
+      },
+    },
+    { key: "w", label: "Save", run: () => void flushSave() },
+    {
+      key: "x",
+      label: "Close tab",
+      run: () => {
+        if (currentFile) void closeTab(currentFile);
+      },
+    },
+    {
+      key: "b",
+      label: "Toggle sidebar",
+      run: () => setSidebarCollapsed(!sidebarCollapsed),
+    },
+    {
+      key: "s",
+      label: "Settings",
+      run: () => {
+        const r = btnSettings.getBoundingClientRect();
+        showSettingsMenu(r.left, r.top);
+      },
+    },
+  ];
+
+  const menu = document.createElement("div");
+  menu.className =
+    "fixed z-50 min-w-56 overflow-hidden rounded-md border border-border bg-panel py-1 text-sm shadow-xl";
+  for (const ent of entries) {
+    const b = document.createElement("button");
+    b.className =
+      "flex w-full items-center gap-3 px-3 py-1.5 text-left text-fg/90 hover:bg-accent hover:text-bg";
+    const key = document.createElement("kbd");
+    key.className =
+      "w-5 shrink-0 rounded bg-border/70 text-center text-xs font-mono text-fg";
+    key.textContent = ent.key;
+    const label = document.createElement("span");
+    label.textContent = ent.label;
+    b.append(key, label);
+    b.addEventListener("click", () => {
+      closeLeader();
+      ent.run();
+    });
+    menu.append(b);
+  }
+
+  mountMenu(
+    menu,
+    window.innerWidth / 2 - 112,
+    Math.max(60, window.innerHeight / 2 - 140),
+  );
+
+  const onKey = (e: KeyboardEvent) => {
+    if (!openMenu) return closeLeader(); // closed by an outside press
+    if (e.key === "Escape") {
+      e.preventDefault();
+      return closeLeader();
+    }
+    const ent = entries.find((x) => x.key === e.key);
+    if (ent) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeLeader();
+      ent.run();
+    }
+  };
+  const closeLeader = () => {
+    document.removeEventListener("keydown", onKey, true);
+    closeContextMenu();
+  };
+  document.addEventListener("keydown", onKey, true);
+}
+
+let pendingKey: string | null = null;
+let pendingTimer: number | undefined;
+function setPending(k: string | null) {
+  pendingKey = k;
+  window.clearTimeout(pendingTimer);
+  if (k) pendingTimer = window.setTimeout(() => (pendingKey = null), 600);
+}
+
+function vimDispatch(e: KeyboardEvent) {
+  if (!vimEnabled) return;
+  const ae = document.activeElement as HTMLElement | null;
+  // Text inputs (search, inline rename, prompt modal) own their own keys.
+  if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
+  if (openMenu) return; // an open menu handles keys itself
+  // Ignore bare modifier presses so they don't disturb a pending sequence.
+  if (["Shift", "Control", "Alt", "Meta"].includes(e.key)) return;
+
+  const editorFocused = !!ae && $("editor").contains(ae);
+  if (editorFocused && editor.getVimMode() === "insert") return; // typing
+
+  // ---- resolve a pending multi-key sequence ----
+  if (pendingKey === "ctrl-w") {
+    setPending(null);
+    if (e.key === "h" || e.key === "l" || e.key === "w") {
+      e.preventDefault();
+      setAppFocus(e.key === "l" ? "editor" : "sidebar");
+    }
+    return;
+  }
+  if (pendingKey === "g") {
+    setPending(null);
+    if (e.key === "t" || e.key === "T") {
+      e.preventDefault();
+      cycleTab(e.key === "t" ? 1 : -1);
+    } else if (e.key === "g" && appFocus === "sidebar") {
+      e.preventDefault();
+      setTreeCursorEnd("first");
+    }
+    return;
+  }
+  if (pendingKey === "d") {
+    setPending(null);
+    if (e.key === "d" && appFocus === "sidebar") {
+      e.preventDefault();
+      const node = cursorNode();
+      if (node) void trashNode(node);
+    }
+    return;
+  }
+
+  // ---- start of a sequence / single global keys ----
+  if (e.ctrlKey && e.key.toLowerCase() === "w") {
+    e.preventDefault();
+    setPending("ctrl-w");
+    return;
+  }
+  if (e.key === " " && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    showLeaderMenu();
+    return;
+  }
+  // gt/gT work whenever the editor isn't focused (so it keeps its own `g`).
+  if (e.key === "g" && !editorFocused && !e.metaKey && !e.ctrlKey) {
+    e.preventDefault();
+    setPending("g");
+    return;
+  }
+
+  if (editorFocused) return; // editor (normal/visual) handles the rest itself
+
+  // ---- sidebar context: bare-key motions ----
+  if (appFocus !== "sidebar" || e.metaKey || e.ctrlKey || e.altKey) return;
+  switch (e.key) {
+    case "j": e.preventDefault(); moveTreeCursor(1); break;
+    case "k": e.preventDefault(); moveTreeCursor(-1); break;
+    case "l":
+    case "Enter": e.preventDefault(); treeOpen(); break;
+    case "h": e.preventDefault(); treeCollapseOrParent(); break;
+    case "G": e.preventDefault(); setTreeCursorEnd("last"); break;
+    case "d": e.preventDefault(); setPending("d"); break;
+    case "o":
+    case "a": e.preventDefault(); void newNote(cursorDir()); break;
+    case "r": {
+      e.preventDefault();
+      const n = cursorNode();
+      if (n && !n.is_dir) startRename(n.path);
+      break;
+    }
+    case "Escape": e.preventDefault(); setAppFocus("editor"); break;
+  }
+}
+
+document.addEventListener("keydown", vimDispatch, true);
 
 // ---- Path helpers (work for POSIX paths on macOS/Linux) --------------------
 function basename(p: string): string {
