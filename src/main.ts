@@ -44,6 +44,7 @@ const statusSaveEl = $("status-save");
 const btnNewFile = $<HTMLButtonElement>("btn-new-file");
 const btnNewFolder = $<HTMLButtonElement>("btn-new-folder");
 const btnOpenVault = $<HTMLButtonElement>("btn-open-vault");
+const vaultNameEl = $("vault-name");
 const tabbarEl = $("tabbar");
 const sidebarEl = $("sidebar");
 const btnToggleSidebar = $<HTMLButtonElement>("btn-toggle-sidebar");
@@ -87,6 +88,12 @@ function scheduleSave(doc: string) {
 
 // ---- Vault / file operations ----------------------------------------------
 async function openVault(path: string) {
+  // Switching to a *different* vault: save the active tab, then close every
+  // open tab and clear the editor so the old vault's files don't linger.
+  if (vaultPath && vaultPath !== path) {
+    await flushSave();
+    forgetTabs(tabs.slice());
+  }
   vaultPath = path;
   activeDir = path;
   localStorage.setItem(STORAGE_KEY, path);
@@ -95,6 +102,8 @@ async function openVault(path: string) {
   searchEl.placeholder = `Search ${basename(path)}…`;
   btnNewFile.disabled = false;
   btnNewFolder.disabled = false;
+  vaultNameEl.textContent = basename(path);
+  btnOpenVault.title = path; // full path on hover
   await refreshTree();
   renderTabs(); // reveal the tab bar (and its "+") for the opened vault
 }
