@@ -7,9 +7,10 @@ import {
   listTree,
   readFile,
   writeFile,
-  createFile,
+  createUntitled,
   createDir,
   movePath,
+  renamePath,
   trashPath,
 } from "./vault";
 
@@ -25,6 +26,7 @@ let activeDir: string | null = null; // where new notes/folders land
 let tree: FileNode[] = [];
 const collapsed = new Set<string>();
 let dragSrcPath: string | null = null; // file/folder being dragged
+let renamingPath: string | null = null; // row currently in inline-rename mode
 
 let editor: EditorHandle;
 let saveTimer: number | undefined;
@@ -431,6 +433,12 @@ function renderFileRow(node: FileNode, depth: number): HTMLElement {
   dot.innerHTML =
     '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>';
 
+  // In rename mode this row is just an icon + text input.
+  if (node.path === renamingPath) {
+    row.append(dot, renameInput(node.path, node.name.replace(/\.md$/i, "")));
+    return row;
+  }
+
   const label = document.createElement("span");
   label.className = "truncate";
   label.textContent = node.name.replace(/\.md$/i, "");
@@ -471,6 +479,28 @@ function makeDraggable(row: HTMLElement, path: string) {
   });
 }
 
+// Reflect a path change (rename or move) of `src` → `newPath` across open tabs,
+// the editor's retained per-tab state, the active file, and the new-item target
+// dir. Handles a moved/renamed folder by remapping everything beneath it too.
+function applyPathChange(src: string, newPath: string) {
+  const remap = (p: string): string =>
+    p === src
+      ? newPath
+      : p.startsWith(src + "/")
+        ? newPath + p.slice(src.length)
+        : p;
+  tabs = tabs.map((p) => {
+    const np = remap(p);
+    if (np !== p) editor.renameDoc(p, np);
+    return np;
+  });
+  if (currentFile) {
+    currentFile = remap(currentFile);
+    statusPathEl.textContent = relativeToVault(currentFile);
+  }
+  if (activeDir) activeDir = remap(activeDir);
+}
+
 async function moveInto(src: string | null, destDir: string) {
   if (!src) return;
   dragSrcPath = null;
@@ -479,28 +509,74 @@ async function moveInto(src: string | null, destDir: string) {
 
   try {
     const newPath = await movePath(src, destDir);
-    // Follow any open tabs whose path was the moved item or lived inside it.
-    const remap = (p: string): string =>
-      p === src
-        ? newPath
-        : p.startsWith(src + "/")
-          ? newPath + p.slice(src.length)
-          : p;
-    tabs = tabs.map((p) => {
-      const np = remap(p);
-      if (np !== p) editor.renameDoc(p, np);
-      return np;
-    });
-    if (currentFile) {
-      currentFile = remap(currentFile);
-      statusPathEl.textContent = relativeToVault(currentFile);
-    }
-    if (activeDir === src) activeDir = newPath;
+    applyPathChange(src, newPath);
     renderTabs();
     persistTabs();
     await refreshTree();
   } catch (e) {
     alertModal(String(e));
+  }
+}
+
+// ---- Inline rename ---------------------------------------------------------
+// Put a file/folder row into edit mode. `renderTree` reads `renamingPath`, so
+// the input survives the imperative re-renders that other actions trigger.
+function startRename(path: string) {
+  renamingPath = path;
+  renderTree();
+}
+
+// Build the edit-mode input for a row. `displayName` is what the user edits
+// (basename without ".md" for files, the full name for folders).
+function renameInput(path: string, displayName: string): HTMLInputElement {
+  const input = document.createElement("input");
+  input.className =
+    "min-w-0 flex-1 rounded border border-accent bg-bg px-1 text-fg outline-none";
+  input.value = displayName;
+
+  let settled = false;
+  const finish = (commit: boolean) => {
+    if (settled) return; // guard the commit→re-render→blur double-fire
+    settled = true;
+    const value = input.value.trim();
+    renamingPath = null;
+    if (commit && value && value !== displayName) {
+      void doRename(path, value);
+    } else {
+      renderTree(); // revert the row to its stored name
+    }
+  };
+
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation(); // don't let the row/global shortcuts see these keys
+    if (e.key === "Enter") {
+      e.preventDefault();
+      finish(true);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => finish(true)); // Finder-style: commit
+  input.addEventListener("click", (e) => e.stopPropagation());
+  // Focus + select the name once the row is mounted.
+  requestAnimationFrame(() => {
+    input.focus();
+    input.select();
+  });
+  return input;
+}
+
+async function doRename(path: string, newName: string) {
+  try {
+    const newPath = await renamePath(path, newName);
+    applyPathChange(path, newPath);
+    renderTabs();
+    persistTabs();
+    await refreshTree();
+  } catch (e) {
+    alertModal(String(e));
+    await refreshTree(); // restore the row to the real on-disk name
   }
 }
 
@@ -670,12 +746,11 @@ searchEl.addEventListener("keydown", (e) => {
 // ---- Create note / folder --------------------------------------------------
 async function newNote(dir: string | null) {
   if (!dir) return;
-  const name = await promptModal("New note", "Untitled");
-  if (!name) return;
   try {
-    const path = await createFile(dir, name);
+    const path = await createUntitled(dir);
     await refreshTree();
     await openFile(path, true);
+    startRename(path); // drop straight into inline rename of the new note
   } catch (e) {
     alertModal(String(e));
   }
@@ -811,11 +886,13 @@ function showContextMenu(x: number, y: number, dir: string, node?: FileNode) {
     item("New folder", () => newFolder(dir)),
   );
 
-  // Delete is only offered when right-clicking an actual file/folder row.
+  // Rename/Delete are only offered when right-clicking an actual file/folder row.
   if (node) {
     const sep = document.createElement("div");
     sep.className = "my-1 border-t border-border";
-    menu.append(sep, item("Delete", () => void trashNode(node)));
+    menu.append(sep);
+    if (!node.is_dir) menu.append(item("Rename", () => startRename(node.path)));
+    menu.append(item("Delete", () => void trashNode(node)));
   }
 
   document.body.appendChild(menu);

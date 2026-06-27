@@ -34,9 +34,17 @@ export const writeFile = (path: string, contents: string): Promise<void> =>
 export const createFile = (dir: string, name: string): Promise<string> =>
   invoke("create_file", { dir, name });
 
+/** Create a new auto-numbered `Untitled.md` in `dir`. Returns the new file path. */
+export const createUntitled = (dir: string): Promise<string> =>
+  invoke("create_untitled", { dir });
+
 /** Create a folder inside `parent`. Returns the new folder path. */
 export const createDir = (parent: string, name: string): Promise<string> =>
   invoke("create_dir", { parent, name });
+
+/** Rename a file or folder in place. Returns its new path. */
+export const renamePath = (src: string, newName: string): Promise<string> =>
+  invoke("rename_path", { src, newName });
 
 /** Move a file or folder into `destDir`. Returns its new path. */
 export const movePath = (src: string, destDir: string): Promise<string> =>
