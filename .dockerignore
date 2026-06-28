@@ -1,0 +1,11 @@
+# Keep the build context small + avoid copying host-built artifacts into the image.
+node_modules
+dist
+src-tauri/target
+src-tauri/gen
+.git
+.vite
+*.log
+.DS_Store
+app-icon.png
+artifacts
