@@ -1,12 +1,11 @@
 import "./style.css";
 import { Fzf, type FzfResultItem } from "fzf";
-import { createEditor, type EditorHandle } from "./editor";
+import { Pane } from "./pane";
+import { basename, dirname, relativeToVault } from "./paths";
 import {
   type FileNode,
   pickVault,
   listTree,
-  readFile,
-  writeFile,
   createUntitled,
   createDir,
   movePath,
@@ -21,19 +20,25 @@ const TABS_KEY = "odinotes.tabs";
 
 // ---- App state -------------------------------------------------------------
 let vaultPath: string | null = null;
-let currentFile: string | null = null; // path of the active tab (null = none)
-let tabs: string[] = []; // ordered paths of open tabs
 let activeDir: string | null = null; // where new notes/folders land
 let tree: FileNode[] = [];
 const collapsed = new Set<string>();
 let dragSrcPath: string | null = null; // file/folder being dragged
 let renamingPath: string | null = null; // row currently in inline-rename mode
 let vimEnabled = localStorage.getItem(VIM_KEY) === "1"; // persisted Vim toggle
-let appFocus: "editor" | "sidebar" = "editor"; // which pane Vim keys drive
+let appFocus: "editor" | "sidebar" = "editor"; // sidebar vs the pane area
 let treeCursor: string | null = null; // path of the keyboard-highlighted row
 
-let editor: EditorHandle;
-let saveTimer: number | undefined;
+// The editor area is a binary tree of panes (tmux-style splits). `currentFile`/
+// `tabs` mirror the *active* pane so the many read-sites (status bar, sidebar
+// highlight, Vim dispatch) keep working; all mutations go through Pane methods.
+type PNode =
+  | { kind: "leaf"; pane: Pane }
+  | { kind: "split"; dir: "row" | "col"; ratio: number; a: PNode; b: PNode };
+let root: PNode | null = null;
+let activePane: Pane | null = null;
+let currentFile: string | null = null; // mirror: active pane's active tab
+let tabs: string[] = []; // mirror: active pane's open tabs
 
 // ---- Element lookups -------------------------------------------------------
 const $ = <T extends HTMLElement>(id: string): T =>
@@ -50,7 +55,7 @@ const btnNewFolder = $<HTMLButtonElement>("btn-new-folder");
 const btnOpenVault = $<HTMLButtonElement>("btn-open-vault");
 const vaultNameEl = $("vault-name");
 const btnSettings = $<HTMLButtonElement>("btn-settings");
-const tabbarEl = $("tabbar");
+const editorWrapEl = $("editor-wrap");
 const sidebarEl = $("sidebar");
 const btnToggleSidebar = $<HTMLButtonElement>("btn-toggle-sidebar");
 
@@ -71,59 +76,88 @@ btnToggleSidebar.addEventListener("click", () =>
   setSidebarCollapsed(!sidebarCollapsed),
 );
 
-// ---- Editor wiring ---------------------------------------------------------
-editor = createEditor(
-  $("editor"),
-  (doc) => {
-    if (!currentFile) return;
-    scheduleSave(doc);
-  },
-  {
+// ---- Pane management -------------------------------------------------------
+// Build the (currently single) pane and mount it into the editor area.
+function createPane(): Pane {
+  const p = new Pane({
     vimEnabled,
-    // `:w` saves the active tab; `:q` closes it; `:wq` is wired in the editor.
-    onSave: () => {
-      void flushSave().then(() => {
-        if (currentFile) statusSaveEl.textContent = "Saved";
-      });
+    onActivate: setActivePane,
+    onActiveChange: syncActivePane,
+    onNewNote: (pn) => {
+      setActivePane(pn);
+      void newNote(activeDir ?? vaultPath);
     },
-    onCloseTab: () => {
-      if (currentFile) void closeTab(currentFile);
+    onSaveStatus: (pn, text) => {
+      if (pn === activePane) statusSaveEl.textContent = text;
     },
-  },
-);
+    onSplit: (pn, dir) => splitActive(dir, pn),
+    onClosePane: (pn) => void closePane(pn),
+  });
+  return p;
+}
 
-// Flip Vim mode, persist it, and apply it to the live editor.
+// Every open leaf pane, left-to-right / top-to-bottom.
+function allPanes(): Pane[] {
+  const out: Pane[] = [];
+  const walk = (n: PNode | null) => {
+    if (!n) return;
+    if (n.kind === "leaf") out.push(n.pane);
+    else {
+      walk(n.a);
+      walk(n.b);
+    }
+  };
+  walk(root);
+  return out;
+}
+
+// Make `p` the focused pane and refresh the global mirror around it.
+function setActivePane(p: Pane) {
+  if (activePane === p) return;
+  activePane?.setActiveRing(false);
+  activePane = p;
+  p.setActiveRing(true);
+  appFocus = "editor";
+  sidebarEl.classList.remove("ring-1", "ring-inset", "ring-accent/40");
+  syncActivePane(p);
+}
+
+// Mirror the active pane's tab state into the globals the rest of the app reads.
+function syncActivePane(p: Pane) {
+  if (p !== activePane) return;
+  currentFile = p.activeTab;
+  tabs = p.tabs;
+  if (currentFile) {
+    activeDir = dirname(currentFile);
+    statusPathEl.textContent = relativeToVault(currentFile, vaultPath);
+    statusSaveEl.textContent = "Saved";
+  } else {
+    statusPathEl.textContent = "No file open";
+    statusSaveEl.textContent = "";
+  }
+  persistLayout();
+  renderTree();
+}
+
+// Flip Vim mode, persist it, and apply it across every pane's editor.
 function setVimEnabled(enabled: boolean) {
   vimEnabled = enabled;
   localStorage.setItem(VIM_KEY, enabled ? "1" : "0");
-  editor.setVim(enabled);
+  for (const p of allPanes()) p.setVim(enabled);
   if (!enabled) {
     treeCursor = null;
     setAppFocus("editor"); // drop the focus ring + cursor, return to the editor
   }
 }
 
-function scheduleSave(doc: string) {
-  statusSaveEl.textContent = "Saving…";
-  window.clearTimeout(saveTimer);
-  saveTimer = window.setTimeout(async () => {
-    if (!currentFile) return;
-    try {
-      await writeFile(currentFile, doc);
-      statusSaveEl.textContent = "Saved";
-    } catch (e) {
-      statusSaveEl.textContent = `Error: ${e}`;
-    }
-  }, 400);
-}
-
 // ---- Vault / file operations ----------------------------------------------
 async function openVault(path: string) {
-  // Switching to a *different* vault: save the active tab, then close every
-  // open tab and clear the editor so the old vault's files don't linger.
+  // Switching to a *different* vault: save and clear every pane first.
   if (vaultPath && vaultPath !== path) {
-    await flushSave();
-    forgetTabs(tabs.slice());
+    for (const p of allPanes()) {
+      await p.flushSave();
+      p.forgetTabs(p.tabs.slice());
+    }
   }
   vaultPath = path;
   activeDir = path;
@@ -135,8 +169,187 @@ async function openVault(path: string) {
   btnNewFolder.disabled = false;
   vaultNameEl.textContent = basename(path);
   btnOpenVault.title = path; // full path on hover
+  ensurePane();
   await refreshTree();
-  renderTabs(); // reveal the tab bar (and its "+") for the opened vault
+}
+
+// Create the root pane on first vault open and mount it into the editor area.
+function ensurePane() {
+  if (root) return;
+  const p = createPane();
+  root = { kind: "leaf", pane: p };
+  emptyStateEl.classList.add("hidden");
+  renderPanes();
+  setActivePane(p);
+}
+
+// ---- Pane tree layout ------------------------------------------------------
+// Rebuild #editor-wrap from the tree. Pane DOM nodes are reused (moved), so the
+// live CodeMirror views survive a relayout.
+function renderPanes() {
+  const panes = allPanes();
+  for (const p of panes) {
+    p.el.style.flex = ""; // reset stale flex bases
+    p.setCanClose(panes.length > 1); // close-pane button only when splittable
+  }
+  editorWrapEl.querySelectorAll(":scope > [data-split], :scope > [data-pane-id]")
+    .forEach((e) => e.remove());
+  if (root) editorWrapEl.appendChild(buildNode(root));
+}
+
+function buildNode(node: PNode): HTMLElement {
+  if (node.kind === "leaf") return node.pane.el;
+  const box = document.createElement("div");
+  box.dataset.split = "1";
+  box.className = `flex min-h-0 min-w-0 flex-1 ${node.dir === "row" ? "flex-row" : "flex-col"}`;
+  const a = buildNode(node.a);
+  const b = buildNode(node.b);
+  a.style.flex = `${node.ratio} 1 0`;
+  b.style.flex = `${1 - node.ratio} 1 0`;
+  const divider = document.createElement("div");
+  divider.className =
+    node.dir === "row"
+      ? "w-px shrink-0 cursor-col-resize bg-border hover:bg-accent"
+      : "h-px shrink-0 cursor-row-resize bg-border hover:bg-accent";
+  divider.addEventListener("pointerdown", (e) => startResize(e, node, box, a, b));
+  box.append(a, divider, b);
+  return box;
+}
+
+// Drag a divider: update the split ratio live by adjusting flex bases directly
+// (no relayout, so editors aren't disturbed).
+function startResize(
+  e: PointerEvent,
+  split: Extract<PNode, { kind: "split" }>,
+  box: HTMLElement,
+  a: HTMLElement,
+  b: HTMLElement,
+) {
+  e.preventDefault();
+  const onMove = (ev: PointerEvent) => {
+    const r = box.getBoundingClientRect();
+    const ratio =
+      split.dir === "row"
+        ? (ev.clientX - r.left) / r.width
+        : (ev.clientY - r.top) / r.height;
+    split.ratio = Math.min(0.85, Math.max(0.15, ratio));
+    a.style.flex = `${split.ratio} 1 0`;
+    b.style.flex = `${1 - split.ratio} 1 0`;
+  };
+  const onUp = () => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    persistLayout();
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+}
+
+// ---- Pane focus / split / close --------------------------------------------
+function focusPane(p: Pane | null) {
+  if (!p) return;
+  setActivePane(p);
+  p.focus();
+}
+
+// Split a pane (the active one by default); the new pane opens the same file
+// (vim :sp behaviour).
+function splitActive(dir: "row" | "col", target: Pane | null = activePane) {
+  if (!root || !target) return;
+  const oldPane = target;
+  const file = oldPane.activeTab;
+  const newPane = createPane();
+  root = replaceLeaf(root, oldPane, {
+    kind: "split",
+    dir,
+    ratio: 0.5,
+    a: { kind: "leaf", pane: oldPane },
+    b: { kind: "leaf", pane: newPane },
+  });
+  renderPanes();
+  setActivePane(newPane);
+  if (file) void newPane.openFile(file);
+  newPane.focus();
+  persistLayout();
+}
+
+function replaceLeaf(node: PNode, target: Pane, repl: PNode): PNode {
+  if (node.kind === "leaf") return node.pane === target ? repl : node;
+  return {
+    ...node,
+    a: replaceLeaf(node.a, target, repl),
+    b: replaceLeaf(node.b, target, repl),
+  };
+}
+
+// Remove `target`'s leaf; its sibling collapses into the parent's slot.
+function removeLeaf(node: PNode, target: Pane): PNode | null {
+  if (node.kind === "leaf") return node.pane === target ? null : node;
+  const a = removeLeaf(node.a, target);
+  const b = removeLeaf(node.b, target);
+  if (!a) return b;
+  if (!b) return a;
+  return { ...node, a, b };
+}
+
+// Close a pane (the active one by default); its sibling reclaims the space.
+async function closePane(target: Pane | null = activePane) {
+  if (!root || !target || root.kind === "leaf") return; // keep ≥1 pane
+  const removed = target;
+  await removed.flushSave();
+  root = removeLeaf(root, removed);
+  removed.destroy();
+  renderPanes();
+  focusPane(allPanes()[0]);
+  persistLayout();
+}
+
+function cyclePane() {
+  const panes = allPanes();
+  if (panes.length < 2) return;
+  const i = activePane ? panes.indexOf(activePane) : 0;
+  focusPane(panes[(i + 1) % panes.length]);
+}
+
+// Move focus to the nearest pane in a direction; off the left edge → sidebar.
+function focusDir(key: "h" | "j" | "k" | "l") {
+  if (appFocus === "sidebar") {
+    if (key === "l") focusPane(activePane ?? allPanes()[0]);
+    return;
+  }
+  const next = paneInDirection(activePane, key);
+  if (next) focusPane(next);
+  else if (key === "h") setAppFocus("sidebar");
+}
+
+function paneInDirection(from: Pane | null, key: "h" | "j" | "k" | "l"): Pane | null {
+  if (!from) return null;
+  const r = from.el.getBoundingClientRect();
+  const cx = (r.left + r.right) / 2;
+  const cy = (r.top + r.bottom) / 2;
+  let best: Pane | null = null;
+  let bestDist = Infinity;
+  for (const p of allPanes()) {
+    if (p === from) continue;
+    const pr = p.el.getBoundingClientRect();
+    const dx = (pr.left + pr.right) / 2 - cx;
+    const dy = (pr.top + pr.bottom) / 2 - cy;
+    const ok =
+      key === "h"
+        ? dx < -1 && Math.abs(dy) <= Math.abs(dx)
+        : key === "l"
+          ? dx > 1 && Math.abs(dy) <= Math.abs(dx)
+          : key === "k"
+            ? dy < -1 && Math.abs(dx) <= Math.abs(dy)
+            : dy > 1 && Math.abs(dx) <= Math.abs(dy);
+    if (!ok) continue;
+    const dist = dx * dx + dy * dy;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = p;
+    }
+  }
+  return best;
 }
 
 async function refreshTree() {
@@ -148,122 +361,21 @@ async function refreshTree() {
   if (searchEl.value.trim()) runSearch(searchEl.value);
 }
 
-// Flush the active tab's pending save to disk before switching away from it.
+// Flush the active pane's pending save (used by `:w` / leader save).
 async function flushSave() {
-  window.clearTimeout(saveTimer);
-  if (currentFile) {
-    try {
-      await writeFile(currentFile, editor.getDoc());
-    } catch {
-      /* best effort */
-    }
-  }
+  await activePane?.flushSave();
 }
 
-// Make `path` the active tab and update the chrome around it (or clear the
-// editor when `path` is null, i.e. no tabs are open).
-function setActive(path: string | null) {
-  currentFile = path;
-  if (path) {
-    activeDir = dirname(path);
-    emptyStateEl.classList.add("hidden");
-    statusPathEl.textContent = relativeToVault(path);
-    statusSaveEl.textContent = "Saved";
-    setAppFocus("editor"); // opening a file hands keyboard control to the editor
-  } else {
-    emptyStateEl.classList.remove("hidden");
-    statusPathEl.textContent = "No file open";
-    statusSaveEl.textContent = "";
-  }
-  renderTabs();
-  renderTree();
-  persistTabs();
+// Thin delegators — callers across the app open/activate/close through the
+// focused pane, which owns the real tab + editor state.
+function openFile(path: string): Promise<void> | undefined {
+  return activePane?.openFile(path);
 }
-
-// Open a note in its own tab: focus it if already open, otherwise append a new
-// tab (after the active one) and focus it.
-async function openFile(path: string) {
-  if (path === currentFile) return;
-  if (tabs.includes(path)) return activateTab(path);
-
-  await flushSave();
-  const text = await readFile(path);
-
-  const at = currentFile ? tabs.indexOf(currentFile) + 1 : tabs.length;
-  tabs.splice(at, 0, path);
-
-  editor.openDoc(path, text);
-  setActive(path);
+function activateTab(path: string): Promise<void> | undefined {
+  return activePane?.activateTab(path);
 }
-
-// Focus an already-open tab, restoring its retained editor state.
-async function activateTab(path: string) {
-  if (path === currentFile) return;
-  await flushSave();
-  editor.openDoc(path, "");
-  setActive(path);
-}
-
-// Close a tab, falling back to a neighbouring tab (or the empty state).
-async function closeTab(path: string) {
-  const idx = tabs.indexOf(path);
-  if (idx === -1) return;
-  if (path === currentFile) await flushSave();
-
-  tabs.splice(idx, 1);
-  editor.closeDoc(path);
-
-  if (path !== currentFile) {
-    renderTabs();
-    persistTabs();
-    return;
-  }
-
-  const next = tabs[idx] ?? tabs[idx - 1] ?? null;
-  if (next) {
-    editor.openDoc(next, "");
-    setActive(next);
-  } else {
-    editor.clear();
-    setActive(null);
-  }
-}
-
-// Drop tabs WITHOUT saving — used when their files are being trashed, so a
-// pending autosave (or a flush) can't recreate them on disk. `paths` is the
-// trashed item plus, for a folder, every open tab beneath it.
-function forgetTabs(paths: string[]) {
-  const doomed = new Set(paths);
-  const oldTabs = tabs.slice();
-  const hitCurrent = currentFile !== null && doomed.has(currentFile);
-  if (hitCurrent) window.clearTimeout(saveTimer); // cancel the debounced write
-
-  for (const p of paths) {
-    if (oldTabs.includes(p)) editor.closeDoc(p);
-  }
-  tabs = oldTabs.filter((p) => !doomed.has(p));
-
-  if (!hitCurrent) {
-    renderTabs();
-    persistTabs();
-    return;
-  }
-
-  // The active tab is gone — fall back to the nearest surviving neighbour.
-  const at = oldTabs.indexOf(currentFile!);
-  let next: string | null = null;
-  for (let i = at + 1; i < oldTabs.length && !next; i++)
-    if (!doomed.has(oldTabs[i])) next = oldTabs[i];
-  for (let i = at - 1; i >= 0 && !next; i--)
-    if (!doomed.has(oldTabs[i])) next = oldTabs[i];
-
-  if (next) {
-    editor.openDoc(next, "");
-    setActive(next);
-  } else {
-    editor.clear();
-    setActive(null);
-  }
+function closeTab(path: string): Promise<void> | undefined {
+  return activePane?.closeTab(path);
 }
 
 // Move a file/folder to the vault's hidden Trash and reconcile UI state.
@@ -271,10 +383,11 @@ async function trashNode(node: FileNode) {
   if (!vaultPath) return;
   try {
     await trashPath(vaultPath, node.path);
-    // Forget the trashed item and, for a folder, any open tab inside it —
+    // Forget the trashed item (and a folder's children) in *every* pane —
     // without flushing, so autosave can't resurrect them at their old paths.
     const prefix = node.path + "/";
-    forgetTabs(tabs.filter((p) => p === node.path || p.startsWith(prefix)));
+    const hit = (p: string) => p === node.path || p.startsWith(prefix);
+    for (const pn of allPanes()) pn.forgetTabs(pn.tabs.filter(hit));
     if (activeDir === node.path || activeDir?.startsWith(prefix)) {
       activeDir = vaultPath;
     }
@@ -284,70 +397,20 @@ async function trashNode(node: FileNode) {
   }
 }
 
-// ---- Tab bar rendering -----------------------------------------------------
-function renderTabs() {
-  tabbarEl.innerHTML = "";
-  // Show the tab bar (and its "+" button) whenever a vault is open.
-  const show = !!vaultPath;
-  tabbarEl.classList.toggle("hidden", !show);
-  tabbarEl.classList.toggle("flex", show);
-  if (!show) return;
-
-  for (const path of tabs) {
-    const active = path === currentFile;
-    const tab = document.createElement("div");
-    tab.className =
-      "group flex h-full min-w-0 max-w-[10rem] shrink-0 cursor-pointer items-center gap-1 border-r border-border px-2 " +
-      (active ? "bg-bg text-fg" : "text-muted hover:bg-border/40 hover:text-fg");
-
-    const label = document.createElement("span");
-    label.className = "truncate text-[11px]";
-    label.textContent = basename(path).replace(/\.md$/i, "");
-
-    const close = document.createElement("button");
-    close.title = "Close tab";
-    close.className =
-      "shrink-0 rounded p-0.5 text-muted hover:bg-border hover:text-fg group-hover:opacity-100 " +
-      (active ? "opacity-100" : "opacity-0");
-    close.innerHTML =
-      '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>';
-    close.addEventListener("click", (e) => {
-      e.stopPropagation();
-      void closeTab(path);
-    });
-
-    tab.append(label, close);
-    tab.addEventListener("click", () => void activateTab(path));
-    // Middle-click closes, matching browser tab behaviour.
-    tab.addEventListener("auxclick", (e) => {
-      if (e.button === 1) {
-        e.preventDefault();
-        void closeTab(path);
-      }
-    });
-    tabbarEl.appendChild(tab);
-  }
-
-  // Trailing "+" — create a new note in a new tab.
-  const add = document.createElement("button");
-  add.title = "New note";
-  add.className =
-    "flex shrink-0 items-center justify-center px-2 text-muted hover:bg-border/40 hover:text-fg";
-  add.innerHTML =
-    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
-  add.addEventListener("click", () => void newNote(activeDir ?? vaultPath));
-  tabbarEl.appendChild(add);
+// ---- Layout persistence ----------------------------------------------------
+// NOTE: only the active pane's tabs persist for now; restoring the full split
+// tree across restarts is Phase 3.
+function persistLayout() {
+  if (!activePane) return;
+  const s = activePane.serialize();
+  localStorage.setItem(TABS_KEY, JSON.stringify({ tabs: s.tabs, active: s.active }));
 }
 
-// ---- Tab persistence -------------------------------------------------------
-function persistTabs() {
-  localStorage.setItem(TABS_KEY, JSON.stringify({ tabs, active: currentFile }));
-}
-
-// Reopen the tabs from the last session whose files still exist.
-async function restoreTabs() {
-  const raw = localStorage.getItem(TABS_KEY);
-  if (!raw) return;
+// Reopen the tabs from the last session whose files still exist. `raw` is
+// captured before `openVault` mounts the pane (which would overwrite the key).
+async function restoreLayout(raw: string | null) {
+  const p = allPanes()[0];
+  if (!raw || !p) return;
   let saved: { tabs?: unknown; active?: unknown };
   try {
     saved = JSON.parse(raw);
@@ -361,17 +424,11 @@ async function restoreTabs() {
       )
     : [];
   if (!valid.length) return;
-
-  for (const p of valid) {
-    tabs.push(p);
-    editor.openDoc(p, await readFile(p));
-  }
   const active =
     typeof saved.active === "string" && valid.includes(saved.active)
       ? saved.active
       : valid[valid.length - 1];
-  editor.openDoc(active, "");
-  setActive(active);
+  await p.restore(valid, active);
 }
 
 // ---- Sidebar rendering -----------------------------------------------------
@@ -525,14 +582,10 @@ function applyPathChange(src: string, newPath: string) {
       : p.startsWith(src + "/")
         ? newPath + p.slice(src.length)
         : p;
-  tabs = tabs.map((p) => {
-    const np = remap(p);
-    if (np !== p) editor.renameDoc(p, np);
-    return np;
-  });
+  for (const p of allPanes()) p.remap(remap);
   if (currentFile) {
     currentFile = remap(currentFile);
-    statusPathEl.textContent = relativeToVault(currentFile);
+    statusPathEl.textContent = relativeToVault(currentFile, vaultPath);
   }
   if (activeDir) activeDir = remap(activeDir);
 }
@@ -546,8 +599,7 @@ async function moveInto(src: string | null, destDir: string) {
   try {
     const newPath = await movePath(src, destDir);
     applyPathChange(src, newPath);
-    renderTabs();
-    persistTabs();
+    persistLayout();
     await refreshTree();
   } catch (e) {
     alertModal(String(e));
@@ -607,8 +659,7 @@ async function doRename(path: string, newName: string) {
   try {
     const newPath = await renamePath(path, newName);
     applyPathChange(path, newPath);
-    renderTabs();
-    persistTabs();
+    persistLayout();
     await refreshTree();
   } catch (e) {
     alertModal(String(e));
@@ -645,7 +696,7 @@ function flattenFiles(nodes: FileNode[], out: SearchItem[] = []): SearchItem[] {
     else
       out.push({
         path: node.path,
-        rel: relativeToVault(node.path).replace(/\.md$/i, ""),
+        rel: relativeToVault(node.path, vaultPath).replace(/\.md$/i, ""),
       });
   }
   return out;
@@ -1076,7 +1127,7 @@ function setAppFocus(target: "editor" | "sidebar") {
     sidebarEl.classList.add("ring-1", "ring-inset", "ring-accent/40");
   } else {
     sidebarEl.classList.remove("ring-1", "ring-inset", "ring-accent/40");
-    if (currentFile) editor.focus();
+    activePane?.focus();
   }
   renderTree();
 }
@@ -1260,18 +1311,14 @@ function vimDispatch(e: KeyboardEvent) {
   // Ignore bare modifier presses so they don't disturb a pending sequence.
   if (["Shift", "Control", "Alt", "Meta"].includes(e.key)) return;
 
-  const editorFocused = !!ae && $("editor").contains(ae);
-  if (editorFocused && editor.getVimMode() === "insert") return; // typing
+  // "Editor focused" = caret is inside some pane's CodeMirror, not a tab strip.
+  // (The pane/split prefix lives in `muxDispatch`, which runs before this and is
+  // independent of Vim mode.)
+  const editorFocused = !!ae?.closest(".cm-editor");
 
-  // ---- resolve a pending multi-key sequence ----
-  if (pendingKey === "ctrl-w") {
-    setPending(null);
-    if (e.key === "h" || e.key === "l" || e.key === "w") {
-      e.preventDefault();
-      setAppFocus(e.key === "l" ? "editor" : "sidebar");
-    }
-    return;
-  }
+  if (editorFocused && activePane?.getVimMode() === "insert") return; // typing
+
+  // ---- resolve a pending sidebar sequence ----
   if (pendingKey === "g") {
     setPending(null);
     if (e.key === "t" || e.key === "T") {
@@ -1294,11 +1341,6 @@ function vimDispatch(e: KeyboardEvent) {
   }
 
   // ---- start of a sequence / single global keys ----
-  if (e.ctrlKey && e.key.toLowerCase() === "w") {
-    e.preventDefault();
-    setPending("ctrl-w");
-    return;
-  }
   if (e.key === " " && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
     showLeaderMenu();
@@ -1335,32 +1377,72 @@ function vimDispatch(e: KeyboardEvent) {
   }
 }
 
-document.addEventListener("keydown", vimDispatch, true);
+// ---- Multiplexer key layer -------------------------------------------------
+// tmux-style pane control, independent of Vim mode. A prefix (Ctrl-b) arms
+// `muxPending`; the next key splits/closes/cycles/moves focus. Registered in
+// the capture phase BEFORE vimDispatch so consumed keys never reach the Vim
+// layer, the bubble-phase shortcuts, or the editor.
+let muxPending = false;
+let muxTimer: number | undefined;
+function setMuxPending(on: boolean) {
+  muxPending = on;
+  window.clearTimeout(muxTimer);
+  if (on) muxTimer = window.setTimeout(() => (muxPending = false), 1500);
+}
 
-// ---- Path helpers (work for POSIX paths on macOS/Linux) --------------------
-function basename(p: string): string {
-  return p.replace(/\/+$/, "").split("/").pop() || p;
-}
-function dirname(p: string): string {
-  const parts = p.replace(/\/+$/, "").split("/");
-  parts.pop();
-  return parts.join("/");
-}
-function relativeToVault(p: string): string {
-  if (vaultPath && p.startsWith(vaultPath)) {
-    return p.slice(vaultPath.length).replace(/^\/+/, "");
+function muxDispatch(e: KeyboardEvent) {
+  const ae = document.activeElement as HTMLElement | null;
+  // Text inputs (search, inline rename, prompt modal) own their own keys.
+  if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
+  if (openMenu) return; // an open menu handles keys itself
+  if (["Shift", "Control", "Alt", "Meta"].includes(e.key)) return; // bare modifier
+
+  // Resolve the follow-up key. Works in any editor mode (CodeMirror is
+  // contenteditable, not an INPUT) since the prefix is caught first.
+  if (muxPending) {
+    setMuxPending(false);
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    switch (e.key) {
+      case "v": splitActive("row"); break; // side-by-side / vsplit
+      case "s": splitActive("col"); break; // stacked / hsplit
+      case "x":
+      case "c":
+      case "q": void closePane(); break;
+      case "o":
+      case "w": cyclePane(); break;
+      case "h": case "ArrowLeft": focusDir("h"); break;
+      case "j": case "ArrowDown": focusDir("j"); break;
+      case "k": case "ArrowUp": focusDir("k"); break;
+      case "l": case "ArrowRight": focusDir("l"); break;
+    }
+    return;
   }
-  return p;
+
+  // Arm the prefix: Ctrl-b (tmux) — Ctrl-l kept as an alias.
+  if (e.ctrlKey && !e.metaKey && !e.altKey) {
+    const k = e.key.toLowerCase();
+    if (k === "b" || k === "l" || e.code === "KeyB" || e.code === "KeyL") {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      setMuxPending(true);
+    }
+  }
 }
+
+document.addEventListener("keydown", muxDispatch, true);
+document.addEventListener("keydown", vimDispatch, true);
 
 // ---- Boot ------------------------------------------------------------------
 (async function init() {
   setSidebarCollapsed(localStorage.getItem(SIDEBAR_KEY) === "1");
   const saved = localStorage.getItem(STORAGE_KEY);
   if (saved) {
+    // Capture the layout before openVault mounts a pane and rewrites the key.
+    const savedLayout = localStorage.getItem(TABS_KEY);
     try {
       await openVault(saved);
-      await restoreTabs();
+      await restoreLayout(savedLayout);
     } catch {
       localStorage.removeItem(STORAGE_KEY);
     }
