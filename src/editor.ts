@@ -3,12 +3,15 @@
 // (`#`, `**`, `*`, `` ` ``, `~~`) are hidden until the cursor enters them.
 import {
   EditorState,
+  Compartment,
   Range,
   ChangeSet,
   RangeSetBuilder,
   type ChangeSpec,
+  type Extension,
   type Text,
 } from "@codemirror/state";
+import { vim, Vim, getCM } from "@replit/codemirror-vim";
 import type { SyntaxNode } from "@lezer/common";
 import {
   EditorView,
@@ -51,7 +54,20 @@ export interface EditorHandle {
   clear(): void;
   getDoc(): string;
   focus(): void;
+  // Turn Vim mode on/off live across the view (and every retained tab state).
+  setVim(enabled: boolean): void;
+  // The editor's current Vim sub-mode, or null when Vim is off. Lets the app
+  // shell's global keymap yield while the user is typing (insert mode).
+  getVimMode(): "insert" | "visual" | "normal" | null;
   destroy(): void;
+}
+
+// Hooks the app shell wires into the editor: Vim's initial state and the
+// file-level actions its ex-commands (`:w`/`:q`/`:wq`) drive.
+export interface EditorHooks {
+  vimEnabled?: boolean;
+  onSave?: () => void;
+  onCloseTab?: () => void;
 }
 
 // Map heading node names to the CSS class that sizes them.
@@ -222,6 +238,26 @@ const theme = EditorView.theme(
     "&": { height: "100%", backgroundColor: "transparent" },
     "&.cm-focused": { outline: "none" },
     ".cm-scroller": { overflow: "auto" },
+    // Vim status bar (mode indicator + `:` ex-command input).
+    ".cm-panels.cm-panels-bottom": { borderTop: "1px solid #29304d" },
+    ".cm-vim-panel": {
+      backgroundColor: "#1f2335",
+      color: "#c0caf5",
+      padding: "1px 8px",
+      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+      fontSize: "12px",
+    },
+    ".cm-vim-panel input": {
+      color: "#c0caf5",
+      fontFamily: "inherit",
+      backgroundColor: "transparent",
+    },
+    // Vim normal-mode block cursor.
+    ".cm-fat-cursor": { background: "#7aa2f7", color: "#1a1b26 !important" },
+    "&:not(.cm-focused) .cm-fat-cursor": {
+      background: "transparent",
+      outline: "1px solid #7aa2f7",
+    },
   },
   { dark: true },
 );
@@ -356,6 +392,7 @@ function outdentList(view: EditorView): boolean {
 export function createEditor(
   parent: HTMLElement,
   onChange: (doc: string) => void,
+  hooks: EditorHooks = {},
 ): EditorHandle {
   // While the view swaps between tabs we mustn't report the swap as an edit.
   let suppress = false;
@@ -363,8 +400,27 @@ export function createEditor(
     if (!suppress && u.docChanged) onChange(u.state.doc.toString());
   });
 
-  // Shared by every tab's EditorState so they all behave identically.
+  // Vim lives in a compartment so it can be toggled live. The "on" extension is
+  // built once and reused, so reconfiguring with the same value preserves each
+  // tab's Vim mode/state instead of resetting it.
+  const vimCompartment = new Compartment();
+  const vimOnExt = vim({ status: true });
+  const vimExt = (on: boolean): Extension => (on ? vimOnExt : []);
+  let vimOn = hooks.vimEnabled ?? false;
+
+  // Ex-commands map onto the app's file actions (defined globally, once).
+  Vim.defineEx("write", "w", () => hooks.onSave?.());
+  Vim.defineEx("quit", "q", () => hooks.onCloseTab?.());
+  Vim.defineEx("wq", "wq", () => {
+    hooks.onSave?.();
+    hooks.onCloseTab?.();
+  });
+
+  // Shared by every tab's EditorState so they all behave identically. Vim is
+  // first so it claims keys in normal mode and falls through to the keymaps
+  // (incl. list-aware Tab) in insert mode.
   const extensions = [
+    vimCompartment.of(vimExt(vimOn)),
     history(),
     drawSelection(),
     EditorView.lineWrapping,
@@ -410,9 +466,12 @@ export function createEditor(
   };
 
   // Swap a state into the view without firing onChange, then restore scroll.
+  // Re-assert the current Vim setting on the incoming state — a state created
+  // while the flag differed would otherwise carry the stale config.
   const swap = (state: EditorState, top: number) => {
     suppress = true;
     view.setState(state);
+    view.dispatch({ effects: vimCompartment.reconfigure(vimExt(vimOn)) });
     suppress = false;
     view.scrollDOM.scrollTop = top;
   };
@@ -454,6 +513,23 @@ export function createEditor(
     },
     focus() {
       view.focus();
+    },
+    setVim(enabled) {
+      vimOn = enabled;
+      view.dispatch({
+        effects: vimCompartment.reconfigure(vimExt(enabled)),
+      });
+    },
+    getVimMode() {
+      if (!vimOn) return null;
+      const cm = getCM(view);
+      const vs = cm?.state?.vim as
+        | { insertMode?: boolean; visualMode?: boolean }
+        | undefined;
+      if (!vs) return "normal";
+      if (vs.insertMode) return "insert";
+      if (vs.visualMode) return "visual";
+      return "normal";
     },
     destroy() {
       view.destroy();
