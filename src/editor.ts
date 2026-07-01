@@ -40,6 +40,7 @@ import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
 import { GFM } from "@lezer/markdown";
 import { tags as t } from "@lezer/highlight";
+import { WIKILINK_RE, MDLINK_RE } from "./graph";
 
 export interface EditorHandle {
   // Swap the editor to the document identified by `key`. If a state for `key`
@@ -68,6 +69,16 @@ export interface EditorHooks {
   vimEnabled?: boolean;
   onSave?: () => void;
   onCloseTab?: () => void;
+  // Resolve a link target to an absolute path, or null if it doesn't resolve.
+  // `relative` marks a standard Markdown link (resolved against the source
+  // note's folder) vs a wikilink (vault-relative / by basename).
+  resolveLink?: (
+    target: string,
+    fromPath: string | null,
+    relative?: boolean,
+  ) => string | null;
+  // Follow a resolved link (Cmd/Ctrl+click) — open the file.
+  onFollowLink?: (path: string) => void;
 }
 
 // Map heading node names to the CSS class that sizes them.
@@ -170,6 +181,89 @@ const livePreview = ViewPlugin.fromClass(
   },
   { decorations: (v) => v.decorations },
 );
+
+// ---- Wikilinks ------------------------------------------------------------
+// The base Markdown grammar has no `[[…]]` token, so wikilinks are found by
+// regex (WIKILINK_RE, shared with graph.ts) rather than the Lezer tree. The
+// display text (alias, or the target) is styled `.cm-wikilink`; the `[[`, an
+// aliased `target|` prefix, and `]]` are hidden with the same reveal-on-cursor
+// logic the raw Markdown markers use.
+function buildWikilinkDecorations(view: EditorView): DecorationSet {
+  const deco: Range<Decoration>[] = [];
+  const doc = view.state.doc;
+  for (const { from, to } of view.visibleRanges) {
+    // Scan whole lines covering the range so a `[[…]]` straddling the viewport
+    // edge isn't split.
+    let pos = doc.lineAt(from).from;
+    const end = doc.lineAt(to).to;
+    while (pos <= end) {
+      const line = doc.lineAt(pos);
+      for (const m of line.text.matchAll(WIKILINK_RE)) {
+        const mStart = line.from + m.index!;
+        const mEnd = mStart + m[0].length;
+        const closeStart = mEnd - 2; // before `]]`
+        const alias = m[2];
+        // Display span: the alias when present, else the target (+ any anchor).
+        const dispFrom = alias !== undefined ? closeStart - alias.length : mStart + 2;
+        if (closeStart > dispFrom) {
+          deco.push(
+            Decoration.mark({ class: "cm-wikilink" }).range(dispFrom, closeStart),
+          );
+        }
+        if (!selectionTouches(view, mStart, mEnd)) {
+          if (dispFrom > mStart) deco.push(hidden.range(mStart, dispFrom));
+          if (mEnd > closeStart) deco.push(hidden.range(closeStart, mEnd));
+        }
+      }
+      pos = line.to + 1;
+    }
+  }
+  return Decoration.set(deco, true);
+}
+
+const wikiLinks = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet;
+    constructor(view: EditorView) {
+      this.decorations = buildWikilinkDecorations(view);
+    }
+    update(u: ViewUpdate) {
+      if (u.docChanged || u.viewportChanged || u.selectionSet) {
+        this.decorations = buildWikilinkDecorations(u.view);
+      }
+    }
+  },
+  { decorations: (v) => v.decorations },
+);
+
+// Find a link (wikilink or relative `.md` Markdown link) whose span covers
+// column `col` within `text`. Returns the target + whether it's a Markdown
+// link, or null. External/absolute Markdown hrefs are ignored.
+function linkAt(
+  text: string,
+  col: number,
+): { target: string; relative: boolean } | null {
+  for (const m of text.matchAll(WIKILINK_RE)) {
+    const s = m.index!;
+    if (col >= s && col <= s + m[0].length) {
+      return { target: m[1].trim(), relative: false };
+    }
+  }
+  for (const m of text.matchAll(MDLINK_RE)) {
+    const s = m.index!;
+    if (col >= s && col <= s + m[0].length) {
+      let href = m[1];
+      if (/^[a-z]+:\/\//i.test(href) || href.startsWith("/")) return null;
+      try {
+        href = decodeURIComponent(href);
+      } catch {
+        /* keep raw href */
+      }
+      return { target: href, relative: true };
+    }
+  }
+  return null;
+}
 
 // Hanging indent for wrapped lines: continuation rows of a soft-wrapped line
 // align under where its content starts (past leading whitespace and any list
@@ -416,6 +510,31 @@ export function createEditor(
     hooks.onCloseTab?.();
   });
 
+  // One retained EditorState (doc + selection + undo history) and one scroll
+  // offset per open tab, keyed by the tab's file path. Declared before the
+  // extensions so the link-click handler can read the active tab as `fromPath`.
+  const states = new Map<string, EditorState>();
+  const scroll = new Map<string, number>();
+  let currentKey: string | null = null;
+
+  // Cmd/Ctrl+click a link to follow it (plain click keeps caret placement).
+  const linkClick = EditorView.domEventHandlers({
+    mousedown(event, view) {
+      if (!(event.metaKey || event.ctrlKey)) return false;
+      if (!hooks.resolveLink || !hooks.onFollowLink) return false;
+      const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+      if (pos == null) return false;
+      const line = view.state.doc.lineAt(pos);
+      const ref = linkAt(line.text, pos - line.from);
+      if (!ref) return false;
+      const dest = hooks.resolveLink(ref.target, currentKey, ref.relative);
+      if (!dest) return false;
+      event.preventDefault();
+      hooks.onFollowLink(dest);
+      return true;
+    },
+  });
+
   // Shared by every tab's EditorState so they all behave identically. Vim is
   // first so it claims keys in normal mode and falls through to the keymaps
   // (incl. list-aware Tab) in insert mode.
@@ -443,18 +562,14 @@ export function createEditor(
     }),
     syntaxHighlighting(highlightStyle),
     livePreview,
+    wikiLinks,
+    linkClick,
     hangingIndent,
     theme,
     listener,
   ];
 
   const makeState = (doc: string) => EditorState.create({ doc, extensions });
-
-  // One retained EditorState (doc + selection + undo history) and one scroll
-  // offset per open tab, keyed by the tab's file path.
-  const states = new Map<string, EditorState>();
-  const scroll = new Map<string, number>();
-  let currentKey: string | null = null;
 
   const view = new EditorView({ state: makeState(""), parent });
 

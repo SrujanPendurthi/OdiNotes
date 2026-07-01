@@ -17,6 +17,9 @@ export interface PaneDeps {
   onSaveStatus: (pane: Pane, text: string) => void; // debounced-save feedback
   onSplit: (pane: Pane, dir: "row" | "col") => void; // split button
   onClosePane: (pane: Pane) => void; // close-pane button
+  // Resolve a link target (wikilink / relative .md) to an absolute path or null.
+  resolveLink: (target: string, from: string | null, relative?: boolean) => string | null;
+  onFollowLink: (path: string) => void; // Cmd/Ctrl+click a link → open it
 }
 
 const FILE_SVG =
@@ -70,6 +73,9 @@ export class Pane {
         onCloseTab: () => {
           if (this.activeTab) void this.closeTab(this.activeTab);
         },
+        resolveLink: (t, from, rel) =>
+          deps.resolveLink(t, from ?? this.activeTab, rel),
+        onFollowLink: (p) => deps.onFollowLink(p),
       },
     );
 

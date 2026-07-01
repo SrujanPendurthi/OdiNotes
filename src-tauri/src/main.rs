@@ -61,6 +61,55 @@ fn build_tree(dir: &Path) -> Vec<FileNode> {
     nodes
 }
 
+/// A note's absolute path plus its full text contents.
+#[derive(Serialize)]
+struct NoteContent {
+    path: String,
+    content: String,
+}
+
+/// Recursively read every `.md` file's contents under `dir`, skipping dotfiles.
+/// `skip` names a directory to prune (the vault-root Trash folder).
+fn collect_notes(dir: &Path, skip: &Path, out: &mut Vec<NoteContent>) {
+    let read = match fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            if path == skip {
+                continue;
+            }
+            collect_notes(&path, skip, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            if let Ok(content) = fs::read_to_string(&path) {
+                out.push(NoteContent {
+                    path: path.to_string_lossy().to_string(),
+                    content,
+                });
+            }
+        }
+    }
+}
+
+/// Read the contents of every `.md` note in the vault (the graph view scans
+/// these for `[[wikilinks]]` and relative Markdown links). One IPC call instead
+/// of a per-file round-trip. The root `Trash` folder is skipped, matching
+/// `list_tree`.
+#[tauri::command]
+fn read_all_notes(vault: String) -> Vec<NoteContent> {
+    let root = PathBuf::from(&vault);
+    let trash = root.join(TRASH_DIR);
+    let mut out = Vec::new();
+    collect_notes(&root, &trash, &mut out);
+    out
+}
+
 #[tauri::command]
 fn list_tree(path: String) -> Vec<FileNode> {
     let mut nodes = build_tree(Path::new(&path));
@@ -316,6 +365,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             list_tree,
+            read_all_notes,
             read_file,
             write_file,
             create_file,

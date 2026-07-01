@@ -2,10 +2,13 @@ import "./style.css";
 import { Fzf, type FzfResultItem } from "fzf";
 import { Pane } from "./pane";
 import { basename, dirname, relativeToVault } from "./paths";
+import { buildResolver, buildGraph, type Resolver } from "./graph";
+import { GraphView } from "./graphview";
 import {
   type FileNode,
   pickVault,
   listTree,
+  readAllNotes,
   createUntitled,
   createDir,
   movePath,
@@ -55,6 +58,7 @@ const btnNewFolder = $<HTMLButtonElement>("btn-new-folder");
 const btnOpenVault = $<HTMLButtonElement>("btn-open-vault");
 const vaultNameEl = $("vault-name");
 const btnSettings = $<HTMLButtonElement>("btn-settings");
+const btnGraph = $<HTMLButtonElement>("btn-graph");
 const editorWrapEl = $("editor-wrap");
 const sidebarEl = $("sidebar");
 const btnToggleSidebar = $<HTMLButtonElement>("btn-toggle-sidebar");
@@ -76,6 +80,42 @@ btnToggleSidebar.addEventListener("click", () =>
   setSidebarCollapsed(!sidebarCollapsed),
 );
 
+// ---- Link resolution / graph view ------------------------------------------
+// The link resolver depends only on `tree` + `vaultPath`; rebuild it lazily and
+// cache it so a wikilink click doesn't re-flatten the tree every time.
+let resolver: Resolver | null = null;
+function getResolver(): Resolver {
+  return (resolver ??= buildResolver(tree, vaultPath));
+}
+function invalidateResolver() {
+  resolver = null;
+}
+
+let graphView: GraphView | null = null;
+function ensureGraphView(): GraphView {
+  return (graphView ??= new GraphView(editorWrapEl, {
+    onOpenFile: (p) => {
+      graphView?.close();
+      void openFile(p);
+      activePane?.focus();
+    },
+  }));
+}
+
+async function openGraph() {
+  if (!vaultPath) return;
+  const gv = ensureGraphView();
+  const notes = await readAllNotes(vaultPath);
+  gv.open(buildGraph(notes, tree, vaultPath));
+}
+
+function toggleGraph() {
+  if (!vaultPath) return;
+  const gv = ensureGraphView();
+  if (gv.isOpen()) gv.close();
+  else void openGraph();
+}
+
 // ---- Pane management -------------------------------------------------------
 // Build the (currently single) pane and mount it into the editor area.
 function createPane(): Pane {
@@ -92,6 +132,10 @@ function createPane(): Pane {
     },
     onSplit: (pn, dir) => splitActive(dir, pn),
     onClosePane: (pn) => void closePane(pn),
+    // A clicked pane becomes active via its capture-phase mousedown handler
+    // before the editor's link handler fires, so `openFile` targets it.
+    resolveLink: (t, from, rel) => getResolver()(t, from, rel),
+    onFollowLink: (p) => void openFile(p),
   });
   return p;
 }
@@ -154,6 +198,7 @@ function setVimEnabled(enabled: boolean) {
 async function openVault(path: string) {
   // Switching to a *different* vault: save and clear every pane first.
   if (vaultPath && vaultPath !== path) {
+    graphView?.close();
     for (const p of allPanes()) {
       await p.flushSave();
       p.forgetTabs(p.tabs.slice());
@@ -355,10 +400,13 @@ function paneInDirection(from: Pane | null, key: "h" | "j" | "k" | "l"): Pane | 
 async function refreshTree() {
   if (!vaultPath) return;
   tree = await listTree(vaultPath);
+  invalidateResolver(); // links may now resolve differently
   renderTree();
   rebuildSearchIndex();
   // Keep an active search in sync with files that were just created/moved.
   if (searchEl.value.trim()) runSearch(searchEl.value);
+  // Rebuild an open graph so new/renamed/deleted notes are reflected.
+  if (graphView?.isOpen()) void openGraph();
 }
 
 // Flush the active pane's pending save (used by `:w` / leader save).
@@ -1060,15 +1108,25 @@ btnSettings.addEventListener("click", () => {
   showSettingsMenu(r.left, r.top); // edge-nudge floats it above the gear
 });
 
+btnGraph.addEventListener("click", () => toggleGraph());
+
 // Also dismiss on Escape or window resize.
 window.addEventListener("resize", closeContextMenu);
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeContextMenu();
+  if (e.key === "Escape") {
+    closeContextMenu();
+    graphView?.close();
+  }
   // ⌘/Ctrl+K jumps to the search bar.
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k" && !searchEl.disabled) {
     e.preventDefault();
     searchEl.focus();
     searchEl.select();
+  }
+  // ⌘/Ctrl+G toggles the graph view.
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "g" && vaultPath) {
+    e.preventDefault();
+    toggleGraph();
   }
   // ⌘/Ctrl+W closes the active tab.
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "w" && currentFile) {
@@ -1208,6 +1266,7 @@ function showLeaderMenu() {
       },
     },
     { key: "e", label: "Focus explorer", run: () => setAppFocus("sidebar") },
+    { key: "g", label: "Graph view", run: () => toggleGraph() },
     { key: "n", label: "New note", run: () => void newNote(cursorDir()) },
     {
       key: "N",

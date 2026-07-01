@@ -24,6 +24,15 @@ export async function pickVault(): Promise<string | null> {
 export const listTree = (path: string): Promise<FileNode[]> =>
   invoke("list_tree", { path });
 
+export interface NoteContent {
+  path: string;
+  content: string;
+}
+
+/** Read the contents of every `.md` note in the vault (for the graph view). */
+export const readAllNotes = (vault: string): Promise<NoteContent[]> =>
+  invoke("read_all_notes", { vault });
+
 export const readFile = (path: string): Promise<string> =>
   invoke("read_file", { path });
 

@@ -102,6 +102,14 @@ body {
   padding: 0.05em 0.35em;
 }
 
+/* Wikilink display text (Cmd/Ctrl+click to follow). */
+.cm-wikilink {
+  color: #7aa2f7;
+  text-decoration: underline;
+  text-decoration-color: #7aa2f766;
+  cursor: pointer;
+}
+
 /* Slim, unobtrusive scrollbars. */
 .cm-scroller::-webkit-scrollbar,
 nav::-webkit-scrollbar {
