@@ -28,9 +28,11 @@ The app is a single window split into layers that talk over Tauri's `invoke` bri
 bar (sidebar toggle + a drag region) spans the window above a sidebar/editor split. The editor
 area hosts a **tree of panes** (tmux-style splits); each pane owns its own tab strip + editor.
 
-**Rust backend (`src-tauri/src/main.rs`)** — six stateless `#[tauri::command]`s, all operating
-on absolute path strings: `list_tree`, `read_file`, `write_file`, `create_file`, `create_dir`,
-`move_path`. `build_tree` recursively walks a folder, skipping dotfiles and non-`.md` files,
+**Rust backend (`src-tauri/src/main.rs`)** — nine stateless `#[tauri::command]`s, all operating
+on absolute path strings: `list_tree`, `read_file`, `write_file`, `create_file`, `create_untitled`,
+`create_dir`, `move_path`, `rename_path`, and `trash_path` (`trash_path` takes the vault root plus
+the target and moves it into a `.trash` dir rather than deleting). `build_tree` recursively walks a
+folder, skipping dotfiles and non-`.md` files,
 returning a `FileNode { name, path, is_dir, children }` tree (folders first, then
 case-insensitive sort). The backend holds no state — the vault path lives in the frontend.
 New commands must be added to `invoke_handler!` in `main()` **and** to `capabilities/default.json`
